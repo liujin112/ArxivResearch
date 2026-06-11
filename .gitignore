@@ -1,0 +1,17 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+*.app
+*.dSYM
+.DS_Store
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+runtime-settings.json
+.agents/
+.claude/
+.coco/
+.trae/
+.trae-cn/

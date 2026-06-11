@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "swift-focusengine-pro": {
+      "source": "mhaviv/Swift-FocusEngine-Agent-Skill",
+      "sourceType": "github",
+      "computedHash": "d7c2bc7be8fb512a5af6830e377240eb8a77dc76a120160e24de18c9d597b926"
+    }
+  }
+}
