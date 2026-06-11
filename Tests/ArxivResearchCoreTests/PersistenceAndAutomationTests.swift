@@ -309,6 +309,31 @@ struct PersistenceAndAutomationTests {
         #expect(Set(paper.queryProfileIDs) == Set([oldProfileID, profile.id]))
     }
 
+    @Test("Automation fetch backfills legacy local added date from published date")
+    func automationFetchBackfillsLegacyAddedAtFromPublishedAt() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        let publishedAt = Date(timeIntervalSince1970: 1_704_067_200)
+        let updatedAt = Date(timeIntervalSince1970: 1_781_139_600)
+        var existing = Paper.fixture(arxivID: "2401.54321")
+        existing.addedAt = nil
+        existing.publishedAt = publishedAt
+        existing.updatedAt = updatedAt
+        try store.upsertQueryProfile(profile)
+        try store.upsertPaper(existing)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: StubArxivClient(),
+            queueSummaries: false
+        )
+
+        try await service.runOnce(now: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let fetched = try store.fetchPaper(arxivID: "2401.54321")
+        let paper = try #require(fetched)
+        #expect(paper.addedAt == publishedAt)
+    }
+
     @Test("Tag canonicalizer lowercases trims and records aliases")
     func canonicalizesTags() throws {
         let canonicalizer = SimpleTagCanonicalizer()

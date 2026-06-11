@@ -137,7 +137,7 @@ public final class ResearchAutomationService {
                     paper.tags = existing.tags
                     paper.zoteroKey = existing.zoteroKey
                     paper.notionPageID = existing.notionPageID
-                    paper.addedAt = existing.addedAt ?? existing.updatedAt ?? existing.publishedAt ?? now
+                    paper.addedAt = existing.addedAt ?? existing.publishedAt ?? existing.updatedAt ?? now
                 }
                 try store.upsertPaper(paper)
                 if queueSummaries {

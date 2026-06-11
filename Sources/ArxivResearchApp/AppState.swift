@@ -513,7 +513,7 @@ final class AppState: ObservableObject {
                     paper.tags = existing.tags
                     paper.zoteroKey = existing.zoteroKey
                     paper.notionPageID = existing.notionPageID
-                    paper.addedAt = existing.addedAt ?? existing.updatedAt ?? existing.publishedAt ?? fetchedAt
+                    paper.addedAt = existing.addedAt ?? existing.publishedAt ?? existing.updatedAt ?? fetchedAt
                 }
                 try store.upsertPaper(paper)
                 if shouldQueueSummaries {

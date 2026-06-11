@@ -129,26 +129,19 @@ public enum PaperLibraryDateBuckets {
             guard let date = paper.localLibraryDate else { return nil }
             return (paper, calendar.startOfDay(for: date))
         }
-        var buckets: [PaperLibraryDateBucket] = []
 
         let todayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: today) }.count
-        if todayCount > 0 {
-            buckets.append(PaperLibraryDateBucket(title: "Today", count: todayCount, filter: .day(today)))
-        }
-
         let yesterdayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: yesterday) }.count
-        if yesterdayCount > 0 {
-            buckets.append(PaperLibraryDateBucket(title: "Yesterday", count: yesterdayCount, filter: .day(yesterday)))
-        }
-
         let thisWeekReference = today
         let thisWeekFilter = PaperLibraryDateFilter.thisWeek(referenceDate: thisWeekReference)
         let thisWeekCount = datedPapers.filter {
             thisWeekFilter.contains($0.paper, calendar: calendar)
         }.count
-        if thisWeekCount > 0 {
-            buckets.append(PaperLibraryDateBucket(title: "This Week", count: thisWeekCount, filter: thisWeekFilter))
-        }
+        var buckets: [PaperLibraryDateBucket] = [
+            PaperLibraryDateBucket(title: "Today", count: todayCount, filter: .day(today)),
+            PaperLibraryDateBucket(title: "Yesterday", count: yesterdayCount, filter: .day(yesterday)),
+            PaperLibraryDateBucket(title: "This Week", count: thisWeekCount, filter: thisWeekFilter)
+        ]
 
         let olderDates = datedPapers
             .filter {
@@ -190,7 +183,7 @@ public enum PaperLibraryDateBuckets {
 
 private extension Paper {
     var localLibraryDate: Date? {
-        addedAt ?? updatedAt ?? publishedAt
+        addedAt ?? publishedAt ?? updatedAt
     }
 }
 

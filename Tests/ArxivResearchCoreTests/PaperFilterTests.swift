@@ -222,6 +222,39 @@ struct PaperFilterTests {
         ])
     }
 
+    @Test("keeps sidebar date shortcuts and groups legacy papers by published date")
+    func keepsSidebarDateShortcutsAndGroupsLegacyPapersByPublishedDate() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        let thursday = date("2026-06-11T12:00:00Z")
+        let legacyPaper = Paper(
+            arxivID: "2601.00021",
+            title: "Legacy Paper",
+            abstract: "Abstract",
+            authors: ["Ada"],
+            publishedAt: date("2026-06-05T08:00:00Z"),
+            updatedAt: date("2026-06-11T08:00:00Z"),
+            addedAt: nil
+        )
+
+        let buckets = PaperLibraryDateBuckets.make(
+            for: [legacyPaper],
+            now: thursday,
+            calendar: calendar
+        )
+
+        #expect(buckets.map(\.title) == ["Today", "Yesterday", "This Week", "Jun 5, 2026"])
+        #expect(buckets.map(\.count) == [0, 0, 0, 1])
+
+        let todayResult = PaperFilter.apply(
+            [legacyPaper],
+            criteria: PaperFilterCriteria(libraryDate: .day(calendar.startOfDay(for: thursday))),
+            calendar: calendar
+        )
+        #expect(todayResult.isEmpty)
+    }
+
     private func paper(_ arxivID: String, addedAt: Date) -> Paper {
         Paper(
             arxivID: arxivID,
