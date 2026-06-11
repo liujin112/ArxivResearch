@@ -115,4 +115,61 @@ struct PaperFilterTests {
 
         #expect(result.map(\.arxivID) == ["2601.00005", "2601.00006", "2601.00007"])
     }
+
+    @Test("filters papers by query subscription")
+    func filtersPapersByQueryProfileID() throws {
+        let selectedProfileID = UUID()
+        let otherProfileID = UUID()
+        let selected = Paper(
+            arxivID: "2601.00008",
+            title: "Selected Query Paper",
+            abstract: "Agents",
+            authors: ["Ada"],
+            queryProfileIDs: [selectedProfileID]
+        )
+        let other = Paper(
+            arxivID: "2601.00009",
+            title: "Other Query Paper",
+            abstract: "Vision",
+            authors: ["Alan"],
+            queryProfileIDs: [otherProfileID]
+        )
+
+        let result = PaperFilter.apply(
+            [selected, other],
+            criteria: PaperFilterCriteria(queryProfileID: selectedProfileID)
+        )
+
+        #expect(result.map(\.arxivID) == ["2601.00008"])
+    }
+
+    @Test("filters papers by local added date")
+    func filtersPapersByLocalAddedDate() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let june11 = Date(timeIntervalSince1970: 1_781_139_600)
+        let june10 = Date(timeIntervalSince1970: 1_781_053_200)
+        let selected = Paper(
+            arxivID: "2601.00010",
+            title: "Today Paper",
+            abstract: "Agents",
+            authors: ["Ada"],
+            addedAt: june11
+        )
+        let other = Paper(
+            arxivID: "2601.00011",
+            title: "Yesterday Paper",
+            abstract: "Vision",
+            authors: ["Alan"],
+            addedAt: june10
+        )
+
+        let result = PaperFilter.apply(
+            [other, selected],
+            criteria: PaperFilterCriteria(libraryDate: .day(june11)),
+            calendar: calendar
+        )
+
+        #expect(result.map(\.arxivID) == ["2601.00010"])
+    }
 }

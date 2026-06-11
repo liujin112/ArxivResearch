@@ -13,7 +13,7 @@ struct ArxivResearchApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Query") {
-                    state.addQuery()
+                    state.beginNewQuery()
                 }
                 .keyboardShortcut("n", modifiers: [.command])
             }

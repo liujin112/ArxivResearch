@@ -131,6 +131,27 @@ struct PersistenceAndAutomationTests {
         #expect(analysis.limitations.isEmpty)
     }
 
+    @Test("Paper JSON without local added date remains decodable")
+    func decodesLegacyPaperWithoutAddedAt() throws {
+        let data = """
+        {
+          "arxivID": "2401.11111",
+          "title": "Legacy Paper",
+          "abstract": "Old local JSON.",
+          "authors": ["Ada"],
+          "categories": [],
+          "queryProfileIDs": [],
+          "status": "new",
+          "tags": []
+        }
+        """.data(using: .utf8)!
+
+        let paper = try JSONDecoder().decode(Paper.self, from: data)
+
+        #expect(paper.arxivID == "2401.11111")
+        #expect(paper.addedAt == nil)
+    }
+
     @Test("SQLite store deletes jobs by kind and state")
     func deletesJobsByKindAndState() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -261,6 +282,31 @@ struct PersistenceAndAutomationTests {
 
         #expect(try store.fetchPapers().map(\.arxivID) == ["2401.54321"])
         #expect(try store.fetchJobs().isEmpty)
+    }
+
+    @Test("Automation fetch preserves existing local added date")
+    func automationFetchPreservesExistingAddedAt() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        let oldProfileID = UUID()
+        let originalAddedAt = Date(timeIntervalSince1970: 1_704_067_200)
+        var existing = Paper.fixture(arxivID: "2401.54321")
+        existing.addedAt = originalAddedAt
+        existing.queryProfileIDs = [oldProfileID]
+        try store.upsertQueryProfile(profile)
+        try store.upsertPaper(existing)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: StubArxivClient(),
+            queueSummaries: false
+        )
+
+        try await service.runOnce(now: Date(timeIntervalSince1970: 1_781_139_600))
+
+        let fetched = try store.fetchPaper(arxivID: "2401.54321")
+        let paper = try #require(fetched)
+        #expect(paper.addedAt == originalAddedAt)
+        #expect(Set(paper.queryProfileIDs) == Set([oldProfileID, profile.id]))
     }
 
     @Test("Tag canonicalizer lowercases trims and records aliases")

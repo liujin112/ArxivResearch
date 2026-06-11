@@ -44,6 +44,8 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
     public var tags: Set<String>
     public var dateRange: PaperDateRange
     public var sort: PaperSortOption
+    public var queryProfileID: UUID?
+    public var libraryDate: PaperLibraryDateFilter
 
     public init(
         searchText: String = "",
@@ -51,7 +53,9 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
         tag: String? = nil,
         tags: Set<String> = [],
         dateRange: PaperDateRange = .all,
-        sort: PaperSortOption = .dateDescending
+        sort: PaperSortOption = .dateDescending,
+        queryProfileID: UUID? = nil,
+        libraryDate: PaperLibraryDateFilter = .all
     ) {
         self.searchText = searchText
         self.status = status
@@ -59,6 +63,25 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
         self.tags = tags
         self.dateRange = dateRange
         self.sort = sort
+        self.queryProfileID = queryProfileID
+        self.libraryDate = libraryDate
+    }
+}
+
+public enum PaperLibraryDateFilter: Codable, Hashable, Sendable {
+    case all
+    case day(Date)
+
+    func contains(_ paper: Paper, calendar: Calendar) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case let .day(day):
+            guard let date = paper.addedAt ?? paper.updatedAt ?? paper.publishedAt else {
+                return false
+            }
+            return calendar.isDate(date, inSameDayAs: day)
+        }
     }
 }
 
@@ -93,7 +116,8 @@ public enum PaperFilter {
         _ papers: [Paper],
         criteria: PaperFilterCriteria,
         analysesByPaperID: [String: LLMAnalysis] = [:],
-        now: Date = Date()
+        now: Date = Date(),
+        calendar: Calendar = .current
     ) -> [Paper] {
         let search = criteria.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var selectedTags = Set(criteria.tags.map {
@@ -111,6 +135,10 @@ public enum PaperFilter {
             if let status = criteria.status, paper.status != status {
                 return false
             }
+            if let queryProfileID = criteria.queryProfileID,
+               !paper.queryProfileIDs.contains(queryProfileID) {
+                return false
+            }
             if !selectedTags.isEmpty {
                 let paperTags = Set(paper.tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
                 if paperTags.isDisjoint(with: selectedTags) {
@@ -118,6 +146,7 @@ public enum PaperFilter {
                 }
             }
             return criteria.dateRange.contains(paper.updatedAt ?? paper.publishedAt, now: now)
+                && criteria.libraryDate.contains(paper, calendar: calendar)
         }
         return sort(filtered, by: criteria.sort, analysesByPaperID: analysesByPaperID)
     }

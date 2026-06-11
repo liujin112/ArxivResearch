@@ -64,4 +64,26 @@ struct ArxivQueryBuilderTests {
 
         #expect(display == #"cat:cs.AI AND (all:agent OR all:"language model") ANDNOT all:survey"#)
     }
+
+    @Test("structured query renders include any exclude phrase and categories")
+    func rendersStructuredQuery() throws {
+        let query = StructuredArxivQuery(
+            includeAll: [
+                StructuredQueryTerm(field: .title, value: "agent", match: .token)
+            ],
+            includeAny: [
+                StructuredQueryTerm(field: .all, value: "language model", match: .phrase),
+                StructuredQueryTerm(field: .abstract, value: "planning", match: .token)
+            ],
+            exclude: [
+                StructuredQueryTerm(field: .all, value: "survey", match: .token)
+            ],
+            categories: ["cs.AI", "cs.LG"]
+        )
+
+        #expect(query.renderedRawQuery == #"ti:agent AND (all:"language model" OR abs:planning) AND (cat:cs.AI OR cat:cs.LG) ANDNOT all:survey"#)
+        #expect(query.encodedQuery.contains("ti:agent"))
+        #expect(query.encodedQuery.contains("ANDNOT"))
+        #expect(query.encodedQuery.contains("%22language+model%22"))
+    }
 }

@@ -7,7 +7,7 @@ struct ResearchWorkspaceView: View {
     @EnvironmentObject private var state: AppState
     private let toolbarTooltips = [
         "Refresh": "Reload local papers and query settings",
-        "Fetch Now": "Fetch the selected arXiv query now",
+        "Fetch Now": "Fetch the selected arXiv subscription now",
         "Interested": "Mark the selected paper as interested",
         "Deep Read": "Queue a full-paper LLM deep read for the selected paper",
         "Run Jobs": "Run pending LLM, Notion, and Zotero jobs",
@@ -39,12 +39,12 @@ struct ResearchWorkspaceView: View {
                 ToolbarHelpButton(
                     title: "Fetch Now",
                     systemImage: "tray.and.arrow.down",
-                    help: "Fetch the selected arXiv query now",
-                    isDisabled: state.isWorking
+                    help: "Fetch the selected arXiv subscription now",
+                    isDisabled: state.selectedSubscriptionID == nil || state.isWorking
                 ) {
                     Task { await state.fetchSelectedQueryNow() }
                 }
-                .help("Fetch the selected arXiv query now")
+                .help("Fetch the selected arXiv subscription now")
                 ToolbarHelpButton(
                     title: "Interested",
                     systemImage: "star",
@@ -98,6 +98,10 @@ struct ResearchWorkspaceView: View {
         .background {
             ToolbarTooltipInstaller(tooltips: toolbarTooltips)
                 .frame(width: 0, height: 0)
+        }
+        .sheet(isPresented: $state.isShowingQueryEditor) {
+            QueryEditorSheetView(profile: state.editingQueryProfile)
+                .environmentObject(state)
         }
     }
 }
@@ -206,144 +210,390 @@ private struct ToolbarTooltipInstaller: NSViewRepresentable {
 
 struct QuerySidebarView: View {
     @EnvironmentObject private var state: AppState
+    @State private var queryPendingDeletion: QueryProfile?
 
     var body: some View {
-        VStack(spacing: 0) {
-            List(selection: $state.selectedQueryID) {
-                Section("Subscriptions") {
-                    ForEach(state.queryProfiles) { profile in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(profile.name)
-                                .font(.headline)
-                            Text(ArxivQueryBuilder.displayRawQuery(profile.rawQuery))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                            Text("Every \(profile.refreshIntervalHours)h")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+        List(selection: sidebarSelection) {
+            Section("Library") {
+                Label("All Papers", systemImage: "tray.full")
+                    .badge(state.papers.count)
+                    .tag(LibrarySidebarSelection.all)
+                ForEach(state.libraryDateBuckets) { bucket in
+                    Label(bucket.title, systemImage: "calendar")
+                        .badge(bucket.count)
+                        .tag(LibrarySidebarSelection.date(bucket.date))
+                }
+            }
+
+            Section("Subscriptions") {
+                Button {
+                    state.beginNewQuery()
+                } label: {
+                    Label("New Query", systemImage: "plus")
+                }
+                .buttonStyle(.plain)
+
+                ForEach(state.queryProfiles) { profile in
+                    QuerySubscriptionRow(profile: profile, paperCount: state.queryPaperCount(id: profile.id))
+                        .tag(LibrarySidebarSelection.query(profile.id))
+                        .contextMenu {
+                            Button {
+                                state.beginEditQuery(id: profile.id)
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            Button {
+                                Task { await state.fetchQuery(id: profile.id) }
+                            } label: {
+                                Label("Fetch Now", systemImage: "tray.and.arrow.down")
+                            }
+                            Button {
+                                state.toggleQueryEnabled(id: profile.id)
+                            } label: {
+                                Label(profile.isEnabled ? "Disable" : "Enable", systemImage: profile.isEnabled ? "pause.circle" : "play.circle")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                queryPendingDeletion = profile
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
                         }
-                        .tag(profile.id)
-                    }
                 }
-            }
-            .overlay {
-                if state.queryProfiles.isEmpty {
-                    ContentUnavailableView("No Queries", systemImage: "magnifyingglass", description: Text("Create a query to start tracking arXiv."))
-                }
-            }
-            Divider()
-            QueryEditorView()
-        }
-    }
-}
-
-struct QueryEditorView: View {
-    @EnvironmentObject private var state: AppState
-    @State private var name = ""
-    @State private var rawQuery = ""
-    @State private var refreshIntervalHours = 24
-    @State private var isEnabled = true
-    @State private var isShowingDeleteQueryDialog = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Query")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    state.addQuery()
-                    syncDraft()
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Add query")
-                Button {
-                    isShowingDeleteQueryDialog = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .help("Delete selected query")
-            }
-            TextField("Name", text: $name)
-            TextField("Raw arXiv query", text: $rawQuery, axis: .vertical)
-                .lineLimit(2...4)
-                .font(.system(.caption, design: .monospaced))
-            Stepper("Every \(refreshIntervalHours) hours", value: $refreshIntervalHours, in: 1...168)
-            Toggle("Enabled", isOn: $isEnabled)
-            Button {
-                saveDraft()
-            } label: {
-                Label("Save Query", systemImage: "tray.and.arrow.down")
-            }
-            HStack {
-                Button {
-                    saveDraft()
-                    Task { await state.testSelectedQuery() }
-                } label: {
-                    Label("Test Query", systemImage: "checkmark.seal")
-                }
-                .disabled(state.isWorking)
-                Button {
-                    saveDraft()
-                    Task { await state.fetchSelectedQueryNow() }
-                } label: {
-                    Label("Fetch Now", systemImage: "tray.and.arrow.down")
-                }
-                .disabled(state.isWorking)
-            }
-            if !draftPreviewURL.isEmpty {
-                Text(draftPreviewURL)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
             }
         }
-        .padding(12)
-        .onAppear(perform: syncDraft)
-        .onChange(of: state.selectedQueryID) {
-            syncDraft()
+        .overlay {
+            if state.queryProfiles.isEmpty && state.papers.isEmpty {
+                ContentUnavailableView("No Papers", systemImage: "doc.text.magnifyingglass", description: Text("Create a query subscription to start tracking arXiv."))
+            }
         }
-        .confirmationDialog("Delete Query", isPresented: $isShowingDeleteQueryDialog) {
+        .confirmationDialog("Delete Query", isPresented: deleteDialogBinding) {
             Button("Delete Query Only") {
-                state.deleteSelectedQuery(deleteAssociatedPapers: false)
-                syncDraft()
+                if let queryPendingDeletion {
+                    state.deleteQuery(id: queryPendingDeletion.id, deleteAssociatedPapers: false)
+                }
+                queryPendingDeletion = nil
             }
             Button("Delete Query and Papers", role: .destructive) {
-                state.deleteSelectedQuery(deleteAssociatedPapers: true)
-                syncDraft()
+                if let queryPendingDeletion {
+                    state.deleteQuery(id: queryPendingDeletion.id, deleteAssociatedPapers: true)
+                }
+                queryPendingDeletion = nil
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                queryPendingDeletion = nil
+            }
         } message: {
             Text("You can keep existing papers, or remove all paper entries associated with this query.")
         }
     }
 
-    private func syncDraft() {
-        guard let query = state.selectedQuery() else {
-            name = ""
-            rawQuery = ""
-            refreshIntervalHours = 24
-            isEnabled = true
-            return
+    private var sidebarSelection: Binding<LibrarySidebarSelection?> {
+        Binding {
+            state.sidebarSelection
+        } set: { selection in
+            state.sidebarSelection = selection ?? .all
+            if case let .query(id) = selection {
+                state.selectedQueryID = id
+            }
         }
-        name = query.name
-        rawQuery = ArxivQueryBuilder.displayRawQuery(query.rawQuery)
-        refreshIntervalHours = query.refreshIntervalHours
-        isEnabled = query.isEnabled
-        state.updateQueryPreview()
     }
 
-    private var draftPreviewURL: String {
-        let request = ArxivAPIRequest(searchQuery: .raw(rawQuery), maxResults: 5)
+    private var deleteDialogBinding: Binding<Bool> {
+        Binding {
+            queryPendingDeletion != nil
+        } set: { isPresented in
+            if !isPresented {
+                queryPendingDeletion = nil
+            }
+        }
+    }
+}
+
+struct QuerySubscriptionRow: View {
+    let profile: QueryProfile
+    let paperCount: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(profile.name)
+                    .font(.headline)
+                    .foregroundStyle(profile.isEnabled ? .primary : .secondary)
+                Spacer()
+                Text("\(paperCount)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Text(ArxivQueryBuilder.displayRawQuery(profile.rawQuery))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            HStack(spacing: 6) {
+                Label(profile.isEnabled ? "Enabled" : "Disabled", systemImage: profile.isEnabled ? "checkmark.circle" : "pause.circle")
+                Text("Every \(profile.refreshIntervalHours)h")
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+struct QueryEditorSheetView: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    let profile: QueryProfile?
+    @State private var name: String
+    @State private var rawQuery: String
+    @State private var refreshIntervalHours: Int
+    @State private var isEnabled: Bool
+    @State private var useRawQuery: Bool
+    @State private var includeAll: [StructuredQueryTerm]
+    @State private var includeAny: [StructuredQueryTerm]
+    @State private var exclude: [StructuredQueryTerm]
+    @State private var selectedCategories: Set<String>
+    @State private var customCategory = ""
+
+    init(profile: QueryProfile?) {
+        self.profile = profile
+        _name = State(initialValue: profile?.name ?? "")
+        _rawQuery = State(initialValue: profile.map { ArxivQueryBuilder.displayRawQuery($0.rawQuery) } ?? "")
+        _refreshIntervalHours = State(initialValue: profile?.refreshIntervalHours ?? 24)
+        _isEnabled = State(initialValue: profile?.isEnabled ?? true)
+        _useRawQuery = State(initialValue: profile != nil)
+        _includeAll = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .token)])
+        _includeAny = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .phrase)])
+        _exclude = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .token)])
+        _selectedCategories = State(initialValue: [])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(profile == nil ? "New arXiv Query" : "Edit arXiv Query")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    SectionView(title: "Basics") {
+                        TextField("Query name", text: $name)
+                        Stepper("Refresh every \(refreshIntervalHours) hours", value: $refreshIntervalHours, in: 1...168)
+                        Toggle("Enabled", isOn: $isEnabled)
+                    }
+
+                    SectionView(title: "Build Query") {
+                        Text("Use these sections like a database search. Include all terms are joined with AND. Include any terms are grouped with OR. Exclude terms become ANDNOT.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        QueryTermGroupView(title: "Include All (AND)", terms: $includeAll)
+                        QueryTermGroupView(title: "Include Any (OR group)", terms: $includeAny)
+                        QueryTermGroupView(title: "Exclude (ANDNOT)", terms: $exclude)
+                    }
+
+                    SectionView(title: "Categories") {
+                        Text("Categories use cat:, for example cat:cs.AI means arXiv Computer Science - Artificial Intelligence.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], alignment: .leading, spacing: 8) {
+                            ForEach(Self.defaultCategories, id: \.self) { category in
+                                Toggle(category, isOn: categoryBinding(category))
+                                    .toggleStyle(.checkbox)
+                            }
+                        }
+                        HStack {
+                            TextField("Custom category, e.g. cs.HC", text: $customCategory)
+                            Button("Add") {
+                                addCustomCategory()
+                            }
+                            .disabled(customCategory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+
+                    SectionView(title: "Field Guide") {
+                        ForEach([ArxivSearchField.all, .title, .abstract, .author, .category], id: \.self) { field in
+                            Text(field.helpText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    SectionView(title: "Preview") {
+                        Toggle("Advanced raw query override", isOn: $useRawQuery)
+                        if useRawQuery {
+                            TextField("Raw arXiv query", text: $rawQuery, axis: .vertical)
+                                .lineLimit(2...5)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        Text(effectiveRawQuery.isEmpty ? "No query terms yet" : effectiveRawQuery)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                        if !previewURL.isEmpty {
+                            Text(previewURL)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    Task { await state.testQuery(rawQuery: effectiveRawQuery) }
+                } label: {
+                    Label("Test Query", systemImage: "checkmark.seal")
+                }
+                .disabled(state.isWorking || effectiveRawQuery.isEmpty)
+                Button {
+                    state.saveQueryDraft(
+                        id: profile?.id,
+                        name: name,
+                        rawQuery: effectiveRawQuery,
+                        refreshIntervalHours: refreshIntervalHours,
+                        isEnabled: isEnabled
+                    )
+                    dismiss()
+                } label: {
+                    Label("Save", systemImage: "tray.and.arrow.down")
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(effectiveRawQuery.isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 680, idealWidth: 760, minHeight: 620, idealHeight: 720)
+    }
+
+    private var structuredQuery: StructuredArxivQuery {
+        StructuredArxivQuery(
+            includeAll: includeAll,
+            includeAny: includeAny,
+            exclude: exclude,
+            categories: Array(selectedCategories)
+        )
+    }
+
+    private var effectiveRawQuery: String {
+        let raw = useRawQuery ? rawQuery : structuredQuery.renderedRawQuery
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var previewURL: String {
+        let request = ArxivAPIRequest(searchQuery: .raw(effectiveRawQuery), maxResults: 5)
         return (try? request.url().absoluteString) ?? ""
     }
 
-    private func saveDraft() {
-        if let id = state.selectedQueryID {
-            state.saveQuery(id: id, name: name, rawQuery: rawQuery, refreshIntervalHours: refreshIntervalHours, isEnabled: isEnabled)
+    private func categoryBinding(_ category: String) -> Binding<Bool> {
+        Binding {
+            selectedCategories.contains(category)
+        } set: { isSelected in
+            if isSelected {
+                selectedCategories.insert(category)
+            } else {
+                selectedCategories.remove(category)
+            }
+        }
+    }
+
+    private func addCustomCategory() {
+        let category = customCategory.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !category.isEmpty else { return }
+        selectedCategories.insert(category)
+        customCategory = ""
+    }
+
+    private static let defaultCategories = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.RO", "stat.ML", "eess.SY", "math.OC"]
+}
+
+struct SectionView<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct QueryTermGroupView: View {
+    let title: String
+    @Binding var terms: [StructuredQueryTerm]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    terms.append(StructuredQueryTerm())
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .help("Add term")
+            }
+            ForEach($terms) { $term in
+                QueryTermRowView(term: $term) {
+                    terms.removeAll { $0.id == term.id }
+                    if terms.isEmpty {
+                        terms.append(StructuredQueryTerm())
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct QueryTermRowView: View {
+    @Binding var term: StructuredQueryTerm
+    let remove: () -> Void
+
+    private let fields: [ArxivSearchField] = [.all, .title, .abstract, .author]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Picker("Field", selection: $term.field) {
+                ForEach(fields, id: \.self) { field in
+                    Text("\(field.displayName) (\(field.rawValue))").tag(field)
+                }
+            }
+            .frame(width: 150)
+            .help(term.field.helpText)
+
+            TextField("keyword or phrase", text: $term.value)
+
+            Picker("Match", selection: $term.match) {
+                Text("Word").tag(QueryTermMatch.token)
+                Text("Phrase").tag(QueryTermMatch.phrase)
+            }
+            .frame(width: 100)
+
+            Button(role: .destructive) {
+                remove()
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Remove term")
         }
     }
 }
@@ -442,7 +692,9 @@ struct PaperListView: View {
             status: statusFilter == "all" ? nil : PaperStatus(rawValue: statusFilter),
             tags: selectedTagFilters,
             dateRange: PaperDateRange(rawValue: dateFilter) ?? .all,
-            sort: PaperSortOption(rawValue: sortFilter) ?? .dateDescending
+            sort: PaperSortOption(rawValue: sortFilter) ?? .dateDescending,
+            queryProfileID: state.selectedQueryFilterID,
+            libraryDate: state.selectedLibraryDateFilter
         ), analysesByPaperID: state.latestAnalysesByPaperID)
     }
 

@@ -2,10 +2,24 @@ import Foundation
 import SwiftUI
 import ArxivResearchCore
 
+enum LibrarySidebarSelection: Hashable {
+    case all
+    case date(Date)
+    case query(UUID)
+}
+
+struct LibraryDateBucket: Identifiable, Hashable {
+    var id: Date { date }
+    var date: Date
+    var title: String
+    var count: Int
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var queryProfiles: [QueryProfile] = []
     @Published var papers: [Paper] = []
+    @Published var sidebarSelection: LibrarySidebarSelection = .all
     @Published var selectedQueryID: QueryProfile.ID?
     @Published var selectedPaperID: Paper.ID?
     @Published var selectedPaperAnalysis: LLMAnalysis?
@@ -42,6 +56,8 @@ final class AppState: ObservableObject {
     @Published var summaryLanguage: SummaryLanguage = .english
     @Published var summaryPromptInstructions = DefaultPrompts.summaryInstructions
     @Published var deepReadPrompt = DefaultPrompts.deepRead
+    @Published var isShowingQueryEditor = false
+    @Published var editingQueryProfile: QueryProfile?
 
     private var store: SQLiteResearchStore?
     private let keychain = KeychainStore()
@@ -51,6 +67,39 @@ final class AppState: ObservableObject {
 
     var selectedPaper: Paper? {
         papers.first { $0.id == selectedPaperID }
+    }
+
+    var selectedQueryFilterID: UUID? {
+        if case let .query(id) = sidebarSelection {
+            return id
+        }
+        return nil
+    }
+
+    var selectedLibraryDateFilter: PaperLibraryDateFilter {
+        if case let .date(date) = sidebarSelection {
+            return .day(date)
+        }
+        return .all
+    }
+
+    var selectedSubscriptionID: UUID? {
+        if case let .query(id) = sidebarSelection {
+            return id
+        }
+        return nil
+    }
+
+    var libraryDateBuckets: [LibraryDateBucket] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: papers) { paper in
+            calendar.startOfDay(for: paper.addedAt ?? paper.updatedAt ?? paper.publishedAt ?? .distantPast)
+        }
+        return grouped
+            .map { date, papers in
+                LibraryDateBucket(date: date, title: dateTitle(for: date, calendar: calendar), count: papers.count)
+            }
+            .sorted { $0.date > $1.date }
     }
 
     var renderedPaperDetailHTML: String {
@@ -137,6 +186,7 @@ final class AppState: ObservableObject {
         }
         try refreshLatestAnalyses()
         selectedQueryID = queryProfiles.first?.id
+        sidebarSelection = .all
         selectedPaperID = papers.first?.id
         try refreshJobCount()
         updateQueryPreview()
@@ -153,16 +203,19 @@ final class AppState: ObservableObject {
     }
 
     func addQuery() {
-        let profile = QueryProfile(name: "New Query", rawQuery: "all:electron")
-        queryProfiles.append(profile)
-        selectedQueryID = profile.id
-        do {
-            try store?.upsertQueryProfile(profile)
-            statusMessage = "Query added"
-            updateQueryPreview()
-        } catch {
-            statusMessage = error.localizedDescription
-        }
+        beginNewQuery()
+    }
+
+    func beginNewQuery() {
+        editingQueryProfile = nil
+        isShowingQueryEditor = true
+    }
+
+    func beginEditQuery(id: QueryProfile.ID) {
+        guard let profile = queryProfiles.first(where: { $0.id == id }) else { return }
+        selectedQueryID = id
+        editingQueryProfile = profile
+        isShowingQueryEditor = true
     }
 
     func saveQuery(id: QueryProfile.ID, name: String, rawQuery: String, refreshIntervalHours: Int, isEnabled: Bool) {
@@ -182,16 +235,74 @@ final class AppState: ObservableObject {
         }
     }
 
+    func saveQueryDraft(id: QueryProfile.ID?, name: String, rawQuery: String, refreshIntervalHours: Int, isEnabled: Bool) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            statusMessage = "Query cannot be empty"
+            return
+        }
+        do {
+            if let id, let index = queryProfiles.firstIndex(where: { $0.id == id }) {
+                var profile = queryProfiles[index]
+                profile.name = trimmedName.isEmpty ? "Untitled Query" : trimmedName
+                profile.rawQuery = trimmedQuery
+                profile.refreshIntervalHours = refreshIntervalHours
+                profile.isEnabled = isEnabled
+                queryProfiles[index] = profile
+                try store?.upsertQueryProfile(profile)
+                selectedQueryID = id
+                statusMessage = "Query saved"
+            } else {
+                let profile = QueryProfile(
+                    name: trimmedName.isEmpty ? "Untitled Query" : trimmedName,
+                    rawQuery: trimmedQuery,
+                    refreshIntervalHours: refreshIntervalHours,
+                    isEnabled: isEnabled
+                )
+                queryProfiles.append(profile)
+                try store?.upsertQueryProfile(profile)
+                selectedQueryID = profile.id
+                statusMessage = "Query added"
+            }
+            isShowingQueryEditor = false
+            editingQueryProfile = nil
+            updateQueryPreview()
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func toggleQueryEnabled(id: QueryProfile.ID) {
+        guard let index = queryProfiles.firstIndex(where: { $0.id == id }) else { return }
+        var profile = queryProfiles[index]
+        profile.isEnabled.toggle()
+        queryProfiles[index] = profile
+        do {
+            try store?.upsertQueryProfile(profile)
+            statusMessage = profile.isEnabled ? "Query enabled" : "Query disabled"
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
     func deleteSelectedQuery(deleteAssociatedPapers: Bool = false) {
         guard let selectedQueryID else { return }
+        deleteQuery(id: selectedQueryID, deleteAssociatedPapers: deleteAssociatedPapers)
+    }
+
+    func deleteQuery(id: QueryProfile.ID, deleteAssociatedPapers: Bool = false) {
         do {
-            try store?.deleteQueryProfile(id: selectedQueryID, deleteAssociatedPapers: deleteAssociatedPapers)
-            queryProfiles.removeAll { $0.id == selectedQueryID }
+            try store?.deleteQueryProfile(id: id, deleteAssociatedPapers: deleteAssociatedPapers)
+            queryProfiles.removeAll { $0.id == id }
             papers = try store?.fetchPapers() ?? papers
             try refreshLatestAnalyses()
             if let selectedPaperID, !papers.contains(where: { $0.id == selectedPaperID }) {
                 self.selectedPaperID = papers.first?.id
                 try loadSelectedAnalysis()
+            }
+            if case let .query(queryID) = sidebarSelection, queryID == id {
+                sidebarSelection = .all
             }
             self.selectedQueryID = queryProfiles.first?.id
             statusMessage = deleteAssociatedPapers ? "Query and associated papers removed" : "Query removed"
@@ -203,6 +314,10 @@ final class AppState: ObservableObject {
 
     func selectedQuery() -> QueryProfile? {
         queryProfiles.first { $0.id == selectedQueryID }
+    }
+
+    func queryPaperCount(id: QueryProfile.ID) -> Int {
+        papers.filter { $0.queryProfileIDs.contains(id) }.count
     }
 
     func selectPaper(_ paper: Paper) {
@@ -358,8 +473,12 @@ final class AppState: ObservableObject {
 
     func testSelectedQuery() async {
         guard let profile = selectedQuery() else { return }
+        await testQuery(rawQuery: profile.rawQuery)
+    }
+
+    func testQuery(rawQuery: String) async {
         await runBusy("Testing query") {
-            let request = ArxivAPIRequest(searchQuery: .raw(profile.rawQuery), maxResults: 5)
+            let request = ArxivAPIRequest(searchQuery: .raw(rawQuery), maxResults: 5)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
             statusMessage = "Query OK: \(feed.entries.count) shown, \(feed.totalResults) total"
@@ -367,20 +486,32 @@ final class AppState: ObservableObject {
     }
 
     func fetchSelectedQueryNow() async {
-        guard var profile = selectedQuery(), let store else { return }
+        guard let id = selectedSubscriptionID else {
+            statusMessage = "Select a subscription before fetching."
+            return
+        }
+        await fetchQuery(id: id)
+    }
+
+    func fetchQuery(id: QueryProfile.ID) async {
+        guard var profile = queryProfiles.first(where: { $0.id == id }), let store else { return }
+        selectedQueryID = id
         await runBusy("Fetching arXiv") {
             let shouldQueueSummaries = try makeAutomationConfiguration().canProcess(.summarizeAbstract)
             let request = ArxivAPIRequest(searchQuery: .raw(profile.rawQuery), maxResults: 25)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
+            let fetchedAt = Date()
             for entry in feed.entries {
                 var paper = entry.asPaper(queryProfileID: profile.id)
+                paper.addedAt = fetchedAt
                 if let existing = try store.fetchPaper(arxivID: paper.arxivID) {
                     paper.queryProfileIDs = Array(Set(existing.queryProfileIDs + [profile.id]))
                     paper.status = existing.status
                     paper.tags = existing.tags
                     paper.zoteroKey = existing.zoteroKey
                     paper.notionPageID = existing.notionPageID
+                    paper.addedAt = existing.addedAt ?? existing.updatedAt ?? existing.publishedAt ?? fetchedAt
                 }
                 try store.upsertPaper(paper)
                 if shouldQueueSummaries {
@@ -916,6 +1047,23 @@ final class AppState: ObservableObject {
         ]
         selectedPaperID = papers.first?.id
     }
+
+    private func dateTitle(for date: Date, calendar: Calendar) -> String {
+        if calendar.isDateInToday(date) {
+            return "Today"
+        }
+        if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        }
+        return Self.sidebarDateFormatter.string(from: date)
+    }
+
+    private static let sidebarDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 }
 
 private enum DefaultsKey {

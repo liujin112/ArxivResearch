@@ -43,6 +43,7 @@ public struct Paper: Identifiable, Codable, Hashable, Sendable {
     public var authors: [String]
     public var publishedAt: Date?
     public var updatedAt: Date?
+    public var addedAt: Date?
     public var primaryCategory: String?
     public var categories: [String]
     public var absURL: URL?
@@ -61,6 +62,7 @@ public struct Paper: Identifiable, Codable, Hashable, Sendable {
         authors: [String],
         publishedAt: Date? = nil,
         updatedAt: Date? = nil,
+        addedAt: Date? = Date(),
         primaryCategory: String? = nil,
         categories: [String] = [],
         absURL: URL? = nil,
@@ -78,6 +80,7 @@ public struct Paper: Identifiable, Codable, Hashable, Sendable {
         self.authors = authors
         self.publishedAt = publishedAt
         self.updatedAt = updatedAt
+        self.addedAt = addedAt
         self.primaryCategory = primaryCategory
         self.categories = categories
         self.absURL = absURL

@@ -129,7 +129,17 @@ public final class ResearchAutomationService {
             let request = ArxivAPIRequest(searchQuery: .raw(profile.rawQuery), maxResults: 50)
             let feed = try await arxivClient.search(request)
             for entry in feed.entries {
-                try store.upsertPaper(entry.asPaper(queryProfileID: profile.id))
+                var paper = entry.asPaper(queryProfileID: profile.id)
+                paper.addedAt = now
+                if let existing = try store.fetchPaper(arxivID: paper.arxivID) {
+                    paper.queryProfileIDs = Array(Set(existing.queryProfileIDs + [profile.id]))
+                    paper.status = existing.status
+                    paper.tags = existing.tags
+                    paper.zoteroKey = existing.zoteroKey
+                    paper.notionPageID = existing.notionPageID
+                    paper.addedAt = existing.addedAt ?? existing.updatedAt ?? existing.publishedAt ?? now
+                }
+                try store.upsertPaper(paper)
                 if queueSummaries {
                     try store.enqueue(SyncJob(kind: .summarizeAbstract, payload: Data(entry.arxivID.utf8)))
                 }

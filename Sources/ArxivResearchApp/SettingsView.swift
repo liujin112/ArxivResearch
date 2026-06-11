@@ -7,7 +7,8 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 Picker("Provider", selection: $state.providerKind) {
                     ForEach(ProviderKind.allCases, id: \.self) { kind in
                         Text(kind.rawValue).tag(kind)
@@ -65,10 +66,11 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("LLM", systemImage: "brain") }
 
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 Section("Research Profile Source") {
                     TextEditor(text: $state.academicProfileInput)
                         .font(.system(.body, design: .monospaced))
@@ -121,10 +123,11 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("Analysis", systemImage: "chart.line.text.clipboard") }
 
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 TextField("Parent Page ID", text: $state.notionParentPageID)
                 TextField("Database ID", text: $state.notionDatabaseID)
                 TextField("Data Source ID", text: $state.notionDataSourceID)
@@ -141,10 +144,11 @@ struct SettingsView: View {
                     Label("Create Inline Database", systemImage: "square.grid.2x2")
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("Notion", systemImage: "square.grid.2x2") }
 
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 Picker("Library", selection: $state.zoteroLibraryKind) {
                     Text("User").tag("user")
                     Text("Group").tag("group")
@@ -158,10 +162,11 @@ struct SettingsView: View {
                     Label("Save Zotero", systemImage: "key")
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("Zotero", systemImage: "books.vertical") }
 
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 TextEditor(text: $state.deepReadPrompt)
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 260)
@@ -172,10 +177,11 @@ struct SettingsView: View {
                     Label("Save Prompt", systemImage: "text.badge.checkmark")
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("Deep Read", systemImage: "doc.text.magnifyingglass") }
 
-            Form {
+            ScrollableSettingsTab {
+                Form {
                 Stepper("Helper interval: 60 minutes", value: .constant(60), in: 60...60)
                     .disabled(true)
                 Button {
@@ -184,8 +190,20 @@ struct SettingsView: View {
                     Label("Install Helper", systemImage: "timer")
                 }
             }
-            .padding(20)
+            }
             .tabItem { Label("Automation", systemImage: "timer") }
+        }
+    }
+}
+
+private struct ScrollableSettingsTab<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ScrollView {
+            content
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 }

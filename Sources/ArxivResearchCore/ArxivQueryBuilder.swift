@@ -9,6 +9,48 @@ public enum ArxivSearchField: String, Codable, CaseIterable, Hashable, Sendable 
     case category = "cat"
     case reportNumber = "rn"
     case all = "all"
+
+    public var displayName: String {
+        switch self {
+        case .all:
+            "All fields"
+        case .title:
+            "Title"
+        case .abstract:
+            "Abstract"
+        case .author:
+            "Author"
+        case .category:
+            "Category"
+        case .comment:
+            "Comment"
+        case .journalReference:
+            "Journal ref"
+        case .reportNumber:
+            "Report number"
+        }
+    }
+
+    public var helpText: String {
+        switch self {
+        case .all:
+            "all: searches all indexed arXiv fields."
+        case .title:
+            "ti: searches the paper title."
+        case .abstract:
+            "abs: searches the paper abstract."
+        case .author:
+            "au: searches author names."
+        case .category:
+            "cat: searches arXiv categories such as cs.AI or cs.LG."
+        case .comment:
+            "co: searches arXiv comment metadata."
+        case .journalReference:
+            "jr: searches journal reference metadata."
+        case .reportNumber:
+            "rn: searches report number metadata."
+        }
+    }
 }
 
 public enum QueryTermMatch: String, Codable, Hashable, Sendable {
@@ -108,6 +150,116 @@ public struct ArxivQueryBuilder {
         allowed.insert(charactersIn: ":_+-./")
         return allowed
     }()
+}
+
+public struct StructuredQueryTerm: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var field: ArxivSearchField
+    public var value: String
+    public var match: QueryTermMatch
+
+    public init(id: UUID = UUID(), field: ArxivSearchField = .all, value: String = "", match: QueryTermMatch = .token) {
+        self.id = id
+        self.field = field
+        self.value = value
+        self.match = match
+    }
+
+    public var isEmpty: Bool {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+public struct StructuredArxivQuery: Codable, Hashable, Sendable {
+    public var includeAll: [StructuredQueryTerm]
+    public var includeAny: [StructuredQueryTerm]
+    public var exclude: [StructuredQueryTerm]
+    public var categories: [String]
+
+    public init(
+        includeAll: [StructuredQueryTerm] = [],
+        includeAny: [StructuredQueryTerm] = [],
+        exclude: [StructuredQueryTerm] = [],
+        categories: [String] = []
+    ) {
+        self.includeAll = includeAll
+        self.includeAny = includeAny
+        self.exclude = exclude
+        self.categories = categories
+    }
+
+    public var isEmpty: Bool {
+        includeAll.allSatisfy(\.isEmpty)
+            && includeAny.allSatisfy(\.isEmpty)
+            && exclude.allSatisfy(\.isEmpty)
+            && normalizedCategories.isEmpty
+    }
+
+    public var renderedRawQuery: String {
+        let requiredParts = includeAll.compactMap(Self.renderTerm)
+        let anyPart = Self.renderGroup(includeAny.compactMap(Self.renderTerm), separator: " OR ")
+        let categoryPart = Self.renderGroup(normalizedCategories.map { "cat:\($0)" }, separator: " OR ")
+        var includeParts = requiredParts
+        if let anyPart {
+            includeParts.append(anyPart)
+        }
+        if let categoryPart {
+            includeParts.append(categoryPart)
+        }
+        let includeQuery = includeParts.joined(separator: " AND ")
+        let excludeQuery = Self.renderGroup(exclude.compactMap(Self.renderTerm), separator: " OR ")
+
+        switch (includeQuery.isEmpty, excludeQuery) {
+        case (true, nil):
+            return ""
+        case (false, nil):
+            return includeQuery
+        case (false, let exclude?):
+            return "\(includeQuery) ANDNOT \(exclude)"
+        case (true, let exclude?):
+            return "all:* ANDNOT \(exclude)"
+        }
+    }
+
+    public var encodedQuery: String {
+        ArxivQueryBuilder.encodedRawQuery(renderedRawQuery)
+    }
+
+    public var expression: ArxivQueryExpression {
+        .raw(renderedRawQuery)
+    }
+
+    private var normalizedCategories: [String] {
+        Array(Set(categories.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })).sorted()
+    }
+
+    private static func renderGroup(_ parts: [String], separator: String) -> String? {
+        guard !parts.isEmpty else {
+            return nil
+        }
+        if parts.count == 1 {
+            return parts[0]
+        }
+        return "(\(parts.joined(separator: separator)))"
+    }
+
+    private static func renderTerm(_ term: StructuredQueryTerm) -> String? {
+        let value = term.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            return nil
+        }
+        let compact = value
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        switch term.match {
+        case .token:
+            return "\(term.field.rawValue):\(compact)"
+        case .phrase:
+            return #"\#(term.field.rawValue):"\#(compact)""#
+        }
+    }
 }
 
 private extension ArxivQueryExpression {
