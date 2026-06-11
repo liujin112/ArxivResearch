@@ -362,11 +362,7 @@ struct QueryEditorSheetView: View {
     @State private var refreshIntervalHours: Int
     @State private var isEnabled: Bool
     @State private var useRawQuery: Bool
-    @State private var includeAll: [StructuredQueryTerm]
-    @State private var includeAny: [StructuredQueryTerm]
-    @State private var exclude: [StructuredQueryTerm]
-    @State private var selectedCategories: Set<String>
-    @State private var customCategory = ""
+    @State private var rootGroup: StructuredQueryGroup
 
     init(profile: QueryProfile?) {
         self.profile = profile
@@ -375,10 +371,7 @@ struct QueryEditorSheetView: View {
         _refreshIntervalHours = State(initialValue: profile?.refreshIntervalHours ?? 24)
         _isEnabled = State(initialValue: profile?.isEnabled ?? true)
         _useRawQuery = State(initialValue: profile != nil)
-        _includeAll = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .token)])
-        _includeAny = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .phrase)])
-        _exclude = State(initialValue: [StructuredQueryTerm(field: .all, value: "", match: .token)])
-        _selectedCategories = State(initialValue: [])
+        _rootGroup = State(initialValue: StructuredQueryGroup())
     }
 
     var body: some View {
@@ -405,32 +398,11 @@ struct QueryEditorSheetView: View {
                     }
 
                     SectionView(title: "Build Query") {
-                        Text("Use these sections like a database search. Include all terms are joined with AND. Include any terms are grouped with OR. Exclude terms become ANDNOT.")
+                        Text("Build a boolean expression. Add terms or nested groups, then choose AND, OR, or ANDNOT between rows. Use Phrase for quoted arXiv terms such as all:\"diffusion model\".")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        QueryTermGroupView(title: "Include All (AND)", terms: $includeAll)
-                        QueryTermGroupView(title: "Include Any (OR group)", terms: $includeAny)
-                        QueryTermGroupView(title: "Exclude (ANDNOT)", terms: $exclude)
-                    }
-
-                    SectionView(title: "Categories") {
-                        Text("Categories use cat:, for example cat:cs.AI means arXiv Computer Science - Artificial Intelligence.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], alignment: .leading, spacing: 8) {
-                            ForEach(Self.defaultCategories, id: \.self) { category in
-                                Toggle(category, isOn: categoryBinding(category))
-                                    .toggleStyle(.checkbox)
-                            }
-                        }
-                        HStack {
-                            TextField("Custom category, e.g. cs.HC", text: $customCategory)
-                            Button("Add") {
-                                addCustomCategory()
-                            }
-                            .disabled(customCategory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
+                        QueryExpressionGroupView(group: $rootGroup, title: "Root Group", depth: 0)
                     }
 
                     SectionView(title: "Field Guide") {
@@ -493,12 +465,7 @@ struct QueryEditorSheetView: View {
     }
 
     private var structuredQuery: StructuredArxivQuery {
-        StructuredArxivQuery(
-            includeAll: includeAll,
-            includeAny: includeAny,
-            exclude: exclude,
-            categories: Array(selectedCategories)
-        )
+        StructuredArxivQuery(rootGroup: rootGroup)
     }
 
     private var effectiveRawQuery: String {
@@ -511,26 +478,6 @@ struct QueryEditorSheetView: View {
         return (try? request.url().absoluteString) ?? ""
     }
 
-    private func categoryBinding(_ category: String) -> Binding<Bool> {
-        Binding {
-            selectedCategories.contains(category)
-        } set: { isSelected in
-            if isSelected {
-                selectedCategories.insert(category)
-            } else {
-                selectedCategories.remove(category)
-            }
-        }
-    }
-
-    private func addCustomCategory() {
-        let category = customCategory.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !category.isEmpty else { return }
-        selectedCategories.insert(category)
-        customCategory = ""
-    }
-
-    private static let defaultCategories = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.RO", "stat.ML", "eess.SY", "math.OC"]
 }
 
 struct SectionView<Content: View>: View {
@@ -547,40 +494,137 @@ struct SectionView<Content: View>: View {
     }
 }
 
-struct QueryTermGroupView: View {
+struct QueryExpressionGroupView: View {
+    @Binding var group: StructuredQueryGroup
     let title: String
-    @Binding var terms: [StructuredQueryTerm]
+    let depth: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
+            }
+
+            ForEach($group.clauses) { $clause in
+                QueryExpressionClauseRowView(
+                    clause: $clause,
+                    isFirst: group.clauses.first?.id == clause.id,
+                    depth: depth
+                ) {
+                    removeClause(id: clause.id)
+                }
+            }
+
+            HStack(spacing: 8) {
                 Button {
-                    terms.append(StructuredQueryTerm())
+                    appendClause(node: .term(StructuredQueryTerm()))
                 } label: {
-                    Image(systemName: "plus.circle")
+                    Label("Term", systemImage: "plus.circle")
                 }
-                .help("Add term")
-            }
-            ForEach($terms) { $term in
-                QueryTermRowView(term: $term) {
-                    terms.removeAll { $0.id == term.id }
-                    if terms.isEmpty {
-                        terms.append(StructuredQueryTerm())
-                    }
+                .help("Add keyword or phrase term")
+
+                Button {
+                    appendClause(node: .group(StructuredQueryGroup()))
+                } label: {
+                    Label("Group", systemImage: "folder.badge.plus")
                 }
+                .help("Add nested boolean group")
             }
+            .controlSize(.small)
+        }
+        .padding(.leading, depth == 0 ? 0 : 14)
+        .padding(depth == 0 ? 0 : 8)
+        .background {
+            if depth > 0 {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.quaternary)
+            }
+        }
+    }
+
+    private func appendClause(node: StructuredQueryNode) {
+        group.clauses.append(StructuredQueryClause(connector: .and, node: node))
+    }
+
+    private func removeClause(id: UUID) {
+        group.clauses.removeAll { $0.id == id }
+        if group.clauses.isEmpty {
+            group.clauses.append(StructuredQueryClause())
         }
     }
 }
 
-struct QueryTermRowView: View {
-    @Binding var term: StructuredQueryTerm
+struct QueryExpressionClauseRowView: View {
+    @Binding var clause: StructuredQueryClause
+    let isFirst: Bool
+    let depth: Int
     let remove: () -> Void
 
-    private let fields: [ArxivSearchField] = [.all, .title, .abstract, .author]
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if isFirst {
+                Text("Start")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 82, alignment: .leading)
+                    .padding(.top, 5)
+            } else {
+                Picker("Operator", selection: $clause.connector) {
+                    ForEach(StructuredQueryConnector.allCases, id: \.self) { connector in
+                        Text(connector.displayName).tag(connector)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 82)
+                .help("Boolean operator before this row")
+            }
+
+            switch clause.node {
+            case .term:
+                QueryExpressionTermRowView(term: termBinding)
+            case .group:
+                QueryExpressionGroupView(group: groupBinding, title: "Nested Group", depth: depth + 1)
+            }
+
+            Button(role: .destructive) {
+                remove()
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .help("Remove row")
+        }
+    }
+
+    private var termBinding: Binding<StructuredQueryTerm> {
+        Binding {
+            if case let .term(term) = clause.node {
+                return term
+            }
+            return StructuredQueryTerm()
+        } set: { term in
+            clause.node = .term(term)
+        }
+    }
+
+    private var groupBinding: Binding<StructuredQueryGroup> {
+        Binding {
+            if case let .group(group) = clause.node {
+                return group
+            }
+            return StructuredQueryGroup()
+        } set: { group in
+            clause.node = .group(group)
+        }
+    }
+}
+
+struct QueryExpressionTermRowView: View {
+    @Binding var term: StructuredQueryTerm
+
+    private let fields: [ArxivSearchField] = [.all, .title, .abstract, .author, .category, .comment, .journalReference, .reportNumber]
 
     var body: some View {
         HStack(spacing: 8) {
@@ -599,14 +643,6 @@ struct QueryTermRowView: View {
                 Text("Phrase").tag(QueryTermMatch.phrase)
             }
             .frame(width: 100)
-
-            Button(role: .destructive) {
-                remove()
-            } label: {
-                Image(systemName: "minus.circle")
-            }
-            .buttonStyle(.plain)
-            .help("Remove term")
         }
     }
 }

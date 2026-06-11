@@ -170,18 +170,121 @@ public struct StructuredQueryTerm: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+public enum StructuredQueryConnector: String, Codable, CaseIterable, Hashable, Sendable {
+    case and = "AND"
+    case or = "OR"
+    case andNot = "ANDNOT"
+
+    public var displayName: String { rawValue }
+}
+
+public indirect enum StructuredQueryNode: Codable, Hashable, Sendable, Identifiable {
+    case term(StructuredQueryTerm)
+    case group(StructuredQueryGroup)
+
+    public var id: UUID {
+        switch self {
+        case let .term(term):
+            term.id
+        case let .group(group):
+            group.id
+        }
+    }
+
+    var renderedRawQuery: String? {
+        switch self {
+        case let .term(term):
+            StructuredArxivQuery.renderTerm(term)
+        case let .group(group):
+            group.renderedRawQuery(wrapInParentheses: true)
+        }
+    }
+
+    var isEmpty: Bool {
+        switch self {
+        case let .term(term):
+            term.isEmpty
+        case let .group(group):
+            group.isEmpty
+        }
+    }
+}
+
+public struct StructuredQueryClause: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var connector: StructuredQueryConnector
+    public var node: StructuredQueryNode
+
+    public init(id: UUID = UUID(), connector: StructuredQueryConnector = .and, node: StructuredQueryNode = .term(StructuredQueryTerm())) {
+        self.id = id
+        self.connector = connector
+        self.node = node
+    }
+
+    var renderedRawQuery: String? {
+        node.renderedRawQuery
+    }
+
+    var isEmpty: Bool {
+        node.isEmpty
+    }
+}
+
+public struct StructuredQueryGroup: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var clauses: [StructuredQueryClause]
+
+    public init(id: UUID = UUID(), clauses: [StructuredQueryClause] = [StructuredQueryClause()]) {
+        self.id = id
+        self.clauses = clauses
+    }
+
+    public var isEmpty: Bool {
+        clauses.allSatisfy(\.isEmpty)
+    }
+
+    public func renderedRawQuery(wrapInParentheses: Bool = false) -> String? {
+        let renderedClauses = clauses.compactMap { clause -> (StructuredQueryConnector, String)? in
+            guard let rendered = clause.renderedRawQuery, !rendered.isEmpty else {
+                return nil
+            }
+            return (clause.connector, rendered)
+        }
+        guard !renderedClauses.isEmpty else {
+            return nil
+        }
+
+        var parts: [String] = []
+        for (index, renderedClause) in renderedClauses.enumerated() {
+            if index == 0 {
+                parts.append(renderedClause.1)
+            } else {
+                parts.append("\(renderedClause.0.rawValue) \(renderedClause.1)")
+            }
+        }
+        let rendered = parts.joined(separator: " ")
+        if wrapInParentheses, renderedClauses.count > 1 {
+            return "(\(rendered))"
+        }
+        return rendered
+    }
+}
+
 public struct StructuredArxivQuery: Codable, Hashable, Sendable {
+    public var rootGroup: StructuredQueryGroup?
     public var includeAll: [StructuredQueryTerm]
     public var includeAny: [StructuredQueryTerm]
     public var exclude: [StructuredQueryTerm]
     public var categories: [String]
 
     public init(
+        rootGroup: StructuredQueryGroup? = nil,
         includeAll: [StructuredQueryTerm] = [],
         includeAny: [StructuredQueryTerm] = [],
         exclude: [StructuredQueryTerm] = [],
         categories: [String] = []
     ) {
+        self.rootGroup = rootGroup
         self.includeAll = includeAll
         self.includeAny = includeAny
         self.exclude = exclude
@@ -189,13 +292,19 @@ public struct StructuredArxivQuery: Codable, Hashable, Sendable {
     }
 
     public var isEmpty: Bool {
-        includeAll.allSatisfy(\.isEmpty)
+        if let rootGroup, !rootGroup.isEmpty {
+            return false
+        }
+        return includeAll.allSatisfy(\.isEmpty)
             && includeAny.allSatisfy(\.isEmpty)
             && exclude.allSatisfy(\.isEmpty)
             && normalizedCategories.isEmpty
     }
 
     public var renderedRawQuery: String {
+        if let rootGroup, let rendered = rootGroup.renderedRawQuery(), !rendered.isEmpty {
+            return rendered
+        }
         let requiredParts = includeAll.compactMap(Self.renderTerm)
         let anyPart = Self.renderGroup(includeAny.compactMap(Self.renderTerm), separator: " OR ")
         let categoryPart = Self.renderGroup(normalizedCategories.map { "cat:\($0)" }, separator: " OR ")
@@ -245,7 +354,7 @@ public struct StructuredArxivQuery: Codable, Hashable, Sendable {
         return "(\(parts.joined(separator: separator)))"
     }
 
-    private static func renderTerm(_ term: StructuredQueryTerm) -> String? {
+    static func renderTerm(_ term: StructuredQueryTerm) -> String? {
         let value = term.value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             return nil
