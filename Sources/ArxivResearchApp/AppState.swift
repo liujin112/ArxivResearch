@@ -234,13 +234,27 @@ final class AppState: ObservableObject {
         isShowingQueryEditor = true
     }
 
-    func saveQuery(id: QueryProfile.ID, name: String, rawQuery: String, refreshIntervalHours: Int, isEnabled: Bool) {
+    func saveQuery(
+        id: QueryProfile.ID,
+        name: String,
+        rawQuery: String,
+        structuredQueryRoot: StructuredQueryGroup?,
+        usesRawQuery: Bool,
+        refreshIntervalHours: Int,
+        isEnabled: Bool,
+        maxResults: Int,
+        submittedAfter: Date?
+    ) {
         guard let index = queryProfiles.firstIndex(where: { $0.id == id }) else { return }
         var profile = queryProfiles[index]
         profile.name = name
         profile.rawQuery = rawQuery
+        profile.structuredQueryRoot = structuredQueryRoot
+        profile.usesRawQuery = usesRawQuery
         profile.refreshIntervalHours = refreshIntervalHours
         profile.isEnabled = isEnabled
+        profile.maxResults = maxResults
+        profile.submittedAfter = submittedAfter
         queryProfiles[index] = profile
         do {
             try store?.upsertQueryProfile(profile)
@@ -251,10 +265,21 @@ final class AppState: ObservableObject {
         }
     }
 
-    func saveQueryDraft(id: QueryProfile.ID?, name: String, rawQuery: String, refreshIntervalHours: Int, isEnabled: Bool) {
+    func saveQueryDraft(
+        id: QueryProfile.ID?,
+        name: String,
+        rawQuery: String,
+        structuredQueryRoot: StructuredQueryGroup?,
+        usesRawQuery: Bool,
+        refreshIntervalHours: Int,
+        isEnabled: Bool,
+        maxResults: Int,
+        submittedAfter: Date?
+    ) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
+        let requestQuery = QueryProfile.composeRequestRawQuery(rawQuery: trimmedQuery, submittedAfter: submittedAfter)
+        guard !requestQuery.isEmpty else {
             statusMessage = "Query cannot be empty"
             return
         }
@@ -263,8 +288,12 @@ final class AppState: ObservableObject {
                 var profile = queryProfiles[index]
                 profile.name = trimmedName.isEmpty ? "Untitled Query" : trimmedName
                 profile.rawQuery = trimmedQuery
+                profile.structuredQueryRoot = structuredQueryRoot
+                profile.usesRawQuery = usesRawQuery
                 profile.refreshIntervalHours = refreshIntervalHours
                 profile.isEnabled = isEnabled
+                profile.maxResults = maxResults
+                profile.submittedAfter = submittedAfter
                 queryProfiles[index] = profile
                 try store?.upsertQueryProfile(profile)
                 selectedQueryID = id
@@ -273,8 +302,12 @@ final class AppState: ObservableObject {
                 let profile = QueryProfile(
                     name: trimmedName.isEmpty ? "Untitled Query" : trimmedName,
                     rawQuery: trimmedQuery,
+                    structuredQueryRoot: structuredQueryRoot,
+                    usesRawQuery: usesRawQuery,
                     refreshIntervalHours: refreshIntervalHours,
-                    isEnabled: isEnabled
+                    isEnabled: isEnabled,
+                    maxResults: maxResults,
+                    submittedAfter: submittedAfter
                 )
                 queryProfiles.append(profile)
                 try store?.upsertQueryProfile(profile)
@@ -489,12 +522,12 @@ final class AppState: ObservableObject {
 
     func testSelectedQuery() async {
         guard let profile = selectedQuery() else { return }
-        await testQuery(rawQuery: profile.rawQuery)
+        await testQuery(rawQuery: profile.requestRawQuery, maxResults: profile.maxResults)
     }
 
-    func testQuery(rawQuery: String) async {
+    func testQuery(rawQuery: String, maxResults: Int = 50) async {
         await runBusy("Testing query") {
-            let request = ArxivAPIRequest(searchQuery: .raw(rawQuery), maxResults: 5)
+            let request = ArxivAPIRequest(searchQuery: .raw(rawQuery), maxResults: maxResults)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
             statusMessage = "Query OK: \(feed.entries.count) shown, \(feed.totalResults) total"
@@ -514,7 +547,7 @@ final class AppState: ObservableObject {
         selectedQueryID = id
         await runBusy("Fetching arXiv") {
             let shouldQueueSummaries = try makeAutomationConfiguration().canProcess(.summarizeAbstract)
-            let request = ArxivAPIRequest(searchQuery: .raw(profile.rawQuery), maxResults: 25)
+            let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
             let fetchedAt = Date()
@@ -775,7 +808,7 @@ final class AppState: ObservableObject {
             queryPreviewURL = ""
             return
         }
-        let request = ArxivAPIRequest(searchQuery: .raw(query.rawQuery), maxResults: 5)
+        let request = ArxivAPIRequest(searchQuery: .raw(query.requestRawQuery), maxResults: query.maxResults)
         queryPreviewURL = (try? request.url().absoluteString) ?? "Invalid query"
     }
 

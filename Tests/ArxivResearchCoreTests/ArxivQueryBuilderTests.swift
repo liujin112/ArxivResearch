@@ -126,4 +126,24 @@ struct ArxivQueryBuilderTests {
         #expect(query.renderedRawQuery == #"(all:"diffusion model" OR all:"flow matching" OR all:"flow model") AND (all:stylization OR all:"style transfer" OR all:"stylized generation")"#)
         #expect(query.encodedQuery.contains("%28all:%22diffusion+model%22+OR+all:%22flow+matching%22+OR+all:%22flow+model%22%29+AND+%28all:stylization+OR+all:%22style+transfer%22+OR+all:%22stylized+generation%22%29"))
     }
+
+    @Test("parses raw nested boolean query back into structured groups")
+    func parsesRawNestedBooleanQuery() throws {
+        let raw = #"(all:"diffusion model" OR all:"flow matching" OR all:"flow model") AND (all:stylization OR all:"style transfer" OR all:"stylized generation")"#
+
+        let rootGroup = try #require(StructuredArxivQuery.parseRawQuery(raw))
+        let query = StructuredArxivQuery(rootGroup: rootGroup)
+
+        #expect(query.renderedRawQuery == raw)
+        #expect(rootGroup.clauses.count == 2)
+        #expect(rootGroup.clauses[1].connector == .and)
+    }
+
+    @Test("new structured query terms default to phrase matching")
+    func newStructuredTermsDefaultToPhraseMatching() throws {
+        let term = StructuredQueryTerm(field: .all, value: "flow matching")
+
+        #expect(term.match == .phrase)
+        #expect(StructuredArxivQuery.renderTerm(term) == #"all:"flow matching""#)
+    }
 }

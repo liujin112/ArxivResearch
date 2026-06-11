@@ -126,7 +126,7 @@ public final class ResearchAutomationService {
         }
 
         for profile in profiles {
-            let request = ArxivAPIRequest(searchQuery: .raw(profile.rawQuery), maxResults: 50)
+            let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
             let feed = try await arxivClient.search(request)
             for entry in feed.entries {
                 var paper = entry.asPaper(queryProfileID: profile.id)

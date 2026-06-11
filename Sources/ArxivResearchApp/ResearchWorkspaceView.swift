@@ -362,13 +362,14 @@ struct QuerySubscriptionRow: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Text(ArxivQueryBuilder.displayRawQuery(profile.rawQuery))
+            Text(ArxivQueryBuilder.displayRawQuery(profile.requestRawQuery))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             HStack(spacing: 6) {
                 Label(profile.isEnabled ? "Enabled" : "Disabled", systemImage: profile.isEnabled ? "checkmark.circle" : "pause.circle")
                 Text("Every \(profile.refreshIntervalHours)h")
+                Text("Max \(profile.maxResults)")
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)
@@ -387,6 +388,9 @@ struct QueryEditorSheetView: View {
     @State private var isEnabled: Bool
     @State private var useRawQuery: Bool
     @State private var rootGroup: StructuredQueryGroup
+    @State private var maxResults: Int
+    @State private var submittedAfterEnabled: Bool
+    @State private var submittedAfter: Date
 
     init(profile: QueryProfile?) {
         self.profile = profile
@@ -394,8 +398,11 @@ struct QueryEditorSheetView: View {
         _rawQuery = State(initialValue: profile.map { ArxivQueryBuilder.displayRawQuery($0.rawQuery) } ?? "")
         _refreshIntervalHours = State(initialValue: profile?.refreshIntervalHours ?? 24)
         _isEnabled = State(initialValue: profile?.isEnabled ?? true)
-        _useRawQuery = State(initialValue: profile != nil)
-        _rootGroup = State(initialValue: StructuredQueryGroup())
+        _useRawQuery = State(initialValue: profile?.usesRawQuery ?? false)
+        _rootGroup = State(initialValue: profile?.structuredQueryRoot ?? StructuredQueryGroup())
+        _maxResults = State(initialValue: profile?.maxResults ?? 50)
+        _submittedAfterEnabled = State(initialValue: profile?.submittedAfter != nil)
+        _submittedAfter = State(initialValue: profile?.submittedAfter ?? Date())
     }
 
     var body: some View {
@@ -418,7 +425,23 @@ struct QueryEditorSheetView: View {
                     SectionView(title: "Basics") {
                         TextField("Query name", text: $name)
                         Stepper("Refresh every \(refreshIntervalHours) hours", value: $refreshIntervalHours, in: 1...168)
+                        Stepper("Fetch up to \(maxResults) papers each run", value: $maxResults, in: 1...500, step: 5)
                         Toggle("Enabled", isOn: $isEnabled)
+                    }
+
+                    SectionView(title: "Date Constraint") {
+                        Toggle("Only include papers submitted after a time", isOn: $submittedAfterEnabled)
+                        if submittedAfterEnabled {
+                            DatePicker(
+                                "Submitted after",
+                                selection: $submittedAfter,
+                                displayedComponents: [.date, .hourAndMinute]
+                            )
+                            .help("arXiv submittedDate uses GMT. The selected instant is converted to GMT in the request.")
+                            Text("Adds submittedDate:[\(QueryProfile.submittedDateGMTString(from: submittedAfter)) TO *] to the query.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     SectionView(title: "Build Query") {
@@ -463,7 +486,7 @@ struct QueryEditorSheetView: View {
             HStack {
                 Spacer()
                 Button {
-                    Task { await state.testQuery(rawQuery: effectiveRawQuery) }
+                    Task { await state.testQuery(rawQuery: effectiveRawQuery, maxResults: maxResults) }
                 } label: {
                     Label("Test Query", systemImage: "checkmark.seal")
                 }
@@ -472,9 +495,13 @@ struct QueryEditorSheetView: View {
                     state.saveQueryDraft(
                         id: profile?.id,
                         name: name,
-                        rawQuery: effectiveRawQuery,
+                        rawQuery: baseRawQuery,
+                        structuredQueryRoot: rootGroup.isEmpty ? nil : rootGroup,
+                        usesRawQuery: useRawQuery,
                         refreshIntervalHours: refreshIntervalHours,
-                        isEnabled: isEnabled
+                        isEnabled: isEnabled,
+                        maxResults: maxResults,
+                        submittedAfter: submittedAfterEnabled ? submittedAfter : nil
                     )
                     dismiss()
                 } label: {
@@ -485,7 +512,7 @@ struct QueryEditorSheetView: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 680, idealWidth: 760, minHeight: 620, idealHeight: 720)
+        .frame(minWidth: 820, idealWidth: 940, minHeight: 680, idealHeight: 780)
     }
 
     private var structuredQuery: StructuredArxivQuery {
@@ -493,12 +520,19 @@ struct QueryEditorSheetView: View {
     }
 
     private var effectiveRawQuery: String {
+        QueryProfile.composeRequestRawQuery(
+            rawQuery: baseRawQuery,
+            submittedAfter: submittedAfterEnabled ? submittedAfter : nil
+        )
+    }
+
+    private var baseRawQuery: String {
         let raw = useRawQuery ? rawQuery : structuredQuery.renderedRawQuery
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var previewURL: String {
-        let request = ArxivAPIRequest(searchQuery: .raw(effectiveRawQuery), maxResults: 5)
+        let request = ArxivAPIRequest(searchQuery: .raw(effectiveRawQuery), maxResults: maxResults)
         return (try? request.url().absoluteString) ?? ""
     }
 
@@ -651,22 +685,42 @@ struct QueryExpressionTermRowView: View {
     private let fields: [ArxivSearchField] = [.all, .title, .abstract, .author, .category, .comment, .journalReference, .reportNumber]
 
     var body: some View {
-        HStack(spacing: 8) {
-            Picker("Field", selection: $term.field) {
-                ForEach(fields, id: \.self) { field in
-                    Text("\(field.displayName) (\(field.rawValue))").tag(field)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Field")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Picker("Field", selection: $term.field) {
+                    ForEach(fields, id: \.self) { field in
+                        Text("\(field.displayName) (\(field.rawValue))").tag(field)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 180)
+                .help(term.field.helpText)
             }
-            .frame(width: 150)
-            .help(term.field.helpText)
 
-            TextField("keyword or phrase", text: $term.value)
-
-            Picker("Match", selection: $term.match) {
-                Text("Word").tag(QueryTermMatch.token)
-                Text("Phrase").tag(QueryTermMatch.phrase)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Keyword or Phrase")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                TextField("diffusion model", text: $term.value)
+                    .frame(minWidth: 240)
             }
-            .frame(width: 100)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Match")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Picker("Match", selection: $term.match) {
+                    Text("Word").tag(QueryTermMatch.token)
+                    Text("Phrase").tag(QueryTermMatch.phrase)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+                .help("Phrase adds quotes for exact phrase matching, such as all:\"flow matching\".")
+            }
         }
     }
 }

@@ -23,6 +23,59 @@ struct PersistenceAndAutomationTests {
         #expect(try store.nextPendingJob()?.kind == .syncNotion)
     }
 
+    @Test("SQLite store persists structured query settings")
+    func persistsStructuredQuerySettings() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let submittedAfter = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let rootGroup = StructuredQueryGroup(clauses: [
+            StructuredQueryClause(node: .group(StructuredQueryGroup(clauses: [
+                StructuredQueryClause(node: .term(StructuredQueryTerm(field: .all, value: "diffusion model", match: .phrase))),
+                StructuredQueryClause(connector: .or, node: .term(StructuredQueryTerm(field: .all, value: "flow matching", match: .phrase)))
+            ]))),
+            StructuredQueryClause(connector: .andNot, node: .term(StructuredQueryTerm(field: .all, value: "robot", match: .phrase)))
+        ])
+        let profile = QueryProfile(
+            name: "Generation",
+            rawQuery: #"(all:"diffusion model" OR all:"flow matching") ANDNOT all:"robot""#,
+            structuredQueryRoot: rootGroup,
+            usesRawQuery: false,
+            maxResults: 125,
+            submittedAfter: submittedAfter
+        )
+
+        try store.upsertQueryProfile(profile)
+
+        let fetched = try #require(store.fetchQueryProfiles().first)
+        #expect(fetched.structuredQueryRoot == rootGroup)
+        #expect(fetched.usesRawQuery == false)
+        #expect(fetched.maxResults == 125)
+        #expect(fetched.submittedAfter == submittedAfter)
+        #expect(fetched.requestRawQuery == #"(all:"diffusion model" OR all:"flow matching") ANDNOT all:"robot" AND submittedDate:[202606010000 TO *]"#)
+        #expect(QueryProfile.composeRequestRawQuery(rawQuery: "", submittedAfter: submittedAfter) == "submittedDate:[202606010000 TO *]")
+    }
+
+    @Test("legacy query profile JSON decodes with safe defaults")
+    func decodesLegacyQueryProfileWithDefaults() throws {
+        let data = """
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "name": "Legacy",
+          "rawQuery": "all:agent",
+          "refreshIntervalHours": 24,
+          "isEnabled": true
+        }
+        """.data(using: .utf8)!
+
+        let profile = try JSONDecoder().decode(QueryProfile.self, from: data)
+
+        #expect(profile.rawQuery == "all:agent")
+        #expect(profile.structuredQueryRoot != nil)
+        #expect(profile.usesRawQuery == false)
+        #expect(profile.maxResults == 50)
+        #expect(profile.submittedAfter == nil)
+        #expect(profile.requestRawQuery == "all:agent")
+    }
+
     @Test("SQLite store deletes paper with related analyses deep reads and paper jobs")
     func deletesPaperCascade() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -284,6 +337,32 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJobs().isEmpty)
     }
 
+    @Test("Automation fetch uses query profile max results and submitted-after filter")
+    func automationFetchUsesQueryProfileRequestSettings() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let client = RecordingArxivClient()
+        let submittedAfter = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let profile = QueryProfile(
+            name: "Agents",
+            rawQuery: "all:agent",
+            maxResults: 123,
+            submittedAfter: submittedAfter
+        )
+        try store.upsertQueryProfile(profile)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: client,
+            queueSummaries: false
+        )
+
+        try await service.runOnce()
+
+        let request = try #require(client.requests.first)
+        #expect(request.maxResults == 123)
+        #expect(try request.url().absoluteString.contains("max_results=123"))
+        #expect(try request.url().absoluteString.contains("submittedDate:%5B202606010000+TO+%2A%5D"))
+    }
+
     @Test("Automation fetch preserves existing local added date")
     func automationFetchPreservesExistingAddedAt() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -465,6 +544,28 @@ private struct StubNotionSyncClient: NotionSyncClient {
 private struct StubArxivClient: ArxivClient {
     func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed {
         ArxivFeed(
+            totalResults: 1,
+            itemsPerPage: 1,
+            entries: [
+                ArxivEntry(
+                    arxivID: "2401.54321",
+                    versionedID: "2401.54321v1",
+                    title: "Stub Paper",
+                    summary: "Stub abstract.",
+                    authors: ["Ada"],
+                    categories: []
+                )
+            ]
+        )
+    }
+}
+
+private final class RecordingArxivClient: ArxivClient {
+    private(set) var requests: [ArxivAPIRequest] = []
+
+    func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed {
+        requests.append(request)
+        return ArxivFeed(
             totalResults: 1,
             itemsPerPage: 1,
             entries: [

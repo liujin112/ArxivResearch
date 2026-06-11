@@ -146,7 +146,7 @@ public struct ArxivQueryBuilder {
 
     private static let arxivAllowedCharacters: CharacterSet = {
         var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "\"[]()&=")
+        allowed.remove(charactersIn: "\"[]()&=*")
         allowed.insert(charactersIn: ":_+-./")
         return allowed
     }()
@@ -158,7 +158,7 @@ public struct StructuredQueryTerm: Codable, Hashable, Sendable, Identifiable {
     public var value: String
     public var match: QueryTermMatch
 
-    public init(id: UUID = UUID(), field: ArxivSearchField = .all, value: String = "", match: QueryTermMatch = .token) {
+    public init(id: UUID = UUID(), field: ArxivSearchField = .all, value: String = "", match: QueryTermMatch = .phrase) {
         self.id = id
         self.field = field
         self.value = value
@@ -368,6 +368,173 @@ public struct StructuredArxivQuery: Codable, Hashable, Sendable {
         case .phrase:
             return #"\#(term.field.rawValue):"\#(compact)""#
         }
+    }
+
+    public static func parseRawQuery(_ raw: String) -> StructuredQueryGroup? {
+        var parser = RawStructuredQueryParser(raw: raw)
+        return parser.parse()
+    }
+}
+
+private enum RawQueryToken: Hashable {
+    case leftParen
+    case rightParen
+    case connector(StructuredQueryConnector)
+    case term(StructuredQueryTerm)
+}
+
+private struct RawStructuredQueryParser {
+    private var tokens: [RawQueryToken]
+    private var index = 0
+
+    init(raw: String) {
+        tokens = RawStructuredQueryTokenizer(raw: raw).tokenize()
+    }
+
+    mutating func parse() -> StructuredQueryGroup? {
+        guard let group = parseGroup(stopsAtRightParenthesis: false),
+              index == tokens.count,
+              !group.isEmpty
+        else {
+            return nil
+        }
+        return group
+    }
+
+    private mutating func parseGroup(stopsAtRightParenthesis: Bool) -> StructuredQueryGroup? {
+        var clauses: [StructuredQueryClause] = []
+
+        while index < tokens.count {
+            if case .rightParen = tokens[index] {
+                guard stopsAtRightParenthesis else {
+                    return nil
+                }
+                index += 1
+                return clauses.isEmpty ? nil : StructuredQueryGroup(clauses: clauses)
+            }
+
+            let connector: StructuredQueryConnector
+            if clauses.isEmpty {
+                connector = .and
+            } else {
+                guard case let .connector(parsedConnector) = tokens[index] else {
+                    return nil
+                }
+                connector = parsedConnector
+                index += 1
+            }
+
+            guard let node = parseNode() else {
+                return nil
+            }
+            clauses.append(StructuredQueryClause(connector: connector, node: node))
+        }
+
+        if stopsAtRightParenthesis {
+            return nil
+        }
+        return clauses.isEmpty ? nil : StructuredQueryGroup(clauses: clauses)
+    }
+
+    private mutating func parseNode() -> StructuredQueryNode? {
+        guard index < tokens.count else {
+            return nil
+        }
+        switch tokens[index] {
+        case .leftParen:
+            index += 1
+            guard let group = parseGroup(stopsAtRightParenthesis: true) else {
+                return nil
+            }
+            return .group(group)
+        case let .term(term):
+            index += 1
+            return .term(term)
+        case .rightParen, .connector:
+            return nil
+        }
+    }
+}
+
+private struct RawStructuredQueryTokenizer {
+    let raw: String
+
+    func tokenize() -> [RawQueryToken] {
+        let readable = ArxivQueryBuilder.displayRawQuery(raw)
+        var tokens: [RawQueryToken] = []
+        var index = readable.startIndex
+
+        while index < readable.endIndex {
+            let character = readable[index]
+            if character.isWhitespace {
+                readable.formIndex(after: &index)
+                continue
+            }
+            if character == "(" {
+                tokens.append(.leftParen)
+                readable.formIndex(after: &index)
+                continue
+            }
+            if character == ")" {
+                tokens.append(.rightParen)
+                readable.formIndex(after: &index)
+                continue
+            }
+
+            let tokenText = readToken(in: readable, from: &index)
+            if let connector = StructuredQueryConnector(rawValue: tokenText.uppercased()) {
+                tokens.append(.connector(connector))
+            } else if let term = parseTerm(tokenText) {
+                tokens.append(.term(term))
+            } else {
+                return []
+            }
+        }
+
+        return tokens
+    }
+
+    private func readToken(in string: String, from index: inout String.Index) -> String {
+        let start = index
+        var isInsideQuote = false
+
+        while index < string.endIndex {
+            let character = string[index]
+            if character == "\"" {
+                isInsideQuote.toggle()
+                string.formIndex(after: &index)
+                continue
+            }
+            if !isInsideQuote, character.isWhitespace || character == "(" || character == ")" {
+                break
+            }
+            string.formIndex(after: &index)
+        }
+
+        return String(string[start..<index])
+    }
+
+    private func parseTerm(_ token: String) -> StructuredQueryTerm? {
+        guard let colonIndex = token.firstIndex(of: ":") else {
+            return nil
+        }
+        let fieldName = String(token[..<colonIndex])
+        guard let field = ArxivSearchField(rawValue: fieldName) else {
+            return nil
+        }
+        var value = String(token[token.index(after: colonIndex)...])
+        let match: QueryTermMatch
+        if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+            value.removeFirst()
+            value.removeLast()
+            match = .phrase
+        } else {
+            match = .token
+        }
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return StructuredQueryTerm(field: field, value: value, match: match)
     }
 }
 

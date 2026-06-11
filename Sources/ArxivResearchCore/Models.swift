@@ -4,24 +4,117 @@ public struct QueryProfile: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var name: String
     public var rawQuery: String
+    public var structuredQueryRoot: StructuredQueryGroup?
+    public var usesRawQuery: Bool
     public var refreshIntervalHours: Int
     public var isEnabled: Bool
     public var lastFetchedAt: Date?
+    public var maxResults: Int
+    public var submittedAfter: Date?
 
     public init(
         id: UUID = UUID(),
         name: String,
         rawQuery: String,
+        structuredQueryRoot: StructuredQueryGroup? = nil,
+        usesRawQuery: Bool = true,
         refreshIntervalHours: Int = 24,
         isEnabled: Bool = true,
-        lastFetchedAt: Date? = nil
+        lastFetchedAt: Date? = nil,
+        maxResults: Int = 50,
+        submittedAfter: Date? = nil
     ) {
         self.id = id
         self.name = name
         self.rawQuery = rawQuery
+        self.structuredQueryRoot = structuredQueryRoot
+        self.usesRawQuery = usesRawQuery
         self.refreshIntervalHours = refreshIntervalHours
         self.isEnabled = isEnabled
         self.lastFetchedAt = lastFetchedAt
+        self.maxResults = Self.normalizedMaxResults(maxResults)
+        self.submittedAfter = submittedAfter
+    }
+
+    public var requestRawQuery: String {
+        Self.composeRequestRawQuery(rawQuery: rawQuery, submittedAfter: submittedAfter)
+    }
+
+    public static func composeRequestRawQuery(rawQuery: String, submittedAfter: Date?) -> String {
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let submittedAfter else {
+            return trimmedQuery
+        }
+        let submittedDate = "submittedDate:[\(submittedDateGMTString(from: submittedAfter)) TO *]"
+        guard !trimmedQuery.isEmpty else {
+            return submittedDate
+        }
+        return "\(trimmedQuery) AND \(submittedDate)"
+    }
+
+    public static func submittedDateGMTString(from date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        return String(
+            format: "%04d%02d%02d%02d%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0,
+            components.hour ?? 0,
+            components.minute ?? 0
+        )
+    }
+
+    private static func normalizedMaxResults(_ maxResults: Int) -> Int {
+        min(max(maxResults, 1), 500)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case rawQuery
+        case structuredQueryRoot
+        case usesRawQuery
+        case refreshIntervalHours
+        case isEnabled
+        case lastFetchedAt
+        case maxResults
+        case submittedAfter
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        rawQuery = try container.decode(String.self, forKey: .rawQuery)
+        refreshIntervalHours = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalHours) ?? 24
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        lastFetchedAt = try container.decodeIfPresent(Date.self, forKey: .lastFetchedAt)
+        maxResults = Self.normalizedMaxResults(try container.decodeIfPresent(Int.self, forKey: .maxResults) ?? 50)
+        submittedAfter = try container.decodeIfPresent(Date.self, forKey: .submittedAfter)
+
+        if let storedRoot = try container.decodeIfPresent(StructuredQueryGroup.self, forKey: .structuredQueryRoot) {
+            structuredQueryRoot = storedRoot
+            usesRawQuery = try container.decodeIfPresent(Bool.self, forKey: .usesRawQuery) ?? false
+        } else {
+            structuredQueryRoot = StructuredArxivQuery.parseRawQuery(rawQuery)
+            usesRawQuery = try container.decodeIfPresent(Bool.self, forKey: .usesRawQuery) ?? (structuredQueryRoot == nil)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(rawQuery, forKey: .rawQuery)
+        try container.encodeIfPresent(structuredQueryRoot, forKey: .structuredQueryRoot)
+        try container.encode(usesRawQuery, forKey: .usesRawQuery)
+        try container.encode(refreshIntervalHours, forKey: .refreshIntervalHours)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encodeIfPresent(lastFetchedAt, forKey: .lastFetchedAt)
+        try container.encode(Self.normalizedMaxResults(maxResults), forKey: .maxResults)
+        try container.encodeIfPresent(submittedAfter, forKey: .submittedAfter)
     }
 }
 
