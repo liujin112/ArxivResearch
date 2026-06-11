@@ -221,7 +221,7 @@ struct QuerySidebarView: View {
                 ForEach(state.libraryDateBuckets) { bucket in
                     Label(bucket.title, systemImage: "calendar")
                         .badge(bucket.count)
-                        .tag(LibrarySidebarSelection.date(bucket.date))
+                        .tag(bucket.selection)
                 }
             }
 

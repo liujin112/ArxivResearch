@@ -172,4 +172,67 @@ struct PaperFilterTests {
 
         #expect(result.map(\.arxivID) == ["2601.00010"])
     }
+
+    @Test("filters papers by this week excluding today and yesterday")
+    func filtersPapersByThisWeekExcludingTodayAndYesterday() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        let thursday = date("2026-06-11T12:00:00Z")
+        let today = paper("2601.00012", addedAt: date("2026-06-11T08:00:00Z"))
+        let yesterday = paper("2601.00013", addedAt: date("2026-06-10T08:00:00Z"))
+        let earlierThisWeek = paper("2601.00014", addedAt: date("2026-06-09T08:00:00Z"))
+        let previousWeek = paper("2601.00015", addedAt: date("2026-06-07T08:00:00Z"))
+
+        let result = PaperFilter.apply(
+            [today, yesterday, earlierThisWeek, previousWeek],
+            criteria: PaperFilterCriteria(libraryDate: .thisWeek(referenceDate: thursday)),
+            calendar: calendar
+        )
+
+        #expect(result.map(\.arxivID) == ["2601.00014"])
+    }
+
+    @Test("builds library date buckets in expected sidebar order")
+    func buildsLibraryDateBucketsInExpectedSidebarOrder() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        let thursday = date("2026-06-11T12:00:00Z")
+        let papers = [
+            paper("2601.00016", addedAt: date("2026-06-11T08:00:00Z")),
+            paper("2601.00017", addedAt: date("2026-06-10T08:00:00Z")),
+            paper("2601.00018", addedAt: date("2026-06-09T08:00:00Z")),
+            paper("2601.00019", addedAt: date("2026-06-08T08:00:00Z")),
+            paper("2601.00020", addedAt: date("2026-06-05T08:00:00Z"))
+        ]
+
+        let buckets = PaperLibraryDateBuckets.make(
+            for: papers,
+            now: thursday,
+            calendar: calendar
+        )
+
+        #expect(buckets.map(\.title).prefix(4) == ["Today", "Yesterday", "This Week", "Jun 5, 2026"])
+        #expect(buckets.map(\.count) == [1, 1, 2, 1])
+        #expect(buckets.map(\.filter).prefix(3) == [
+            .day(calendar.startOfDay(for: thursday)),
+            .day(calendar.startOfDay(for: date("2026-06-10T12:00:00Z"))),
+            .thisWeek(referenceDate: calendar.startOfDay(for: thursday))
+        ])
+    }
+
+    private func paper(_ arxivID: String, addedAt: Date) -> Paper {
+        Paper(
+            arxivID: arxivID,
+            title: "Paper \(arxivID)",
+            abstract: "Abstract",
+            authors: ["Ada"],
+            addedAt: addedAt
+        )
+    }
+
+    private func date(_ iso8601: String) -> Date {
+        ISO8601DateFormatter().date(from: iso8601)!
+    }
 }

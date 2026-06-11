@@ -4,13 +4,14 @@ import ArxivResearchCore
 
 enum LibrarySidebarSelection: Hashable {
     case all
+    case thisWeek
     case date(Date)
     case query(UUID)
 }
 
 struct LibraryDateBucket: Identifiable, Hashable {
-    var id: Date { date }
-    var date: Date
+    var id: LibrarySidebarSelection { selection }
+    var selection: LibrarySidebarSelection
     var title: String
     var count: Int
 }
@@ -80,6 +81,9 @@ final class AppState: ObservableObject {
         if case let .date(date) = sidebarSelection {
             return .day(date)
         }
+        if case .thisWeek = sidebarSelection {
+            return .thisWeek(referenceDate: Date())
+        }
         return .all
     }
 
@@ -91,15 +95,13 @@ final class AppState: ObservableObject {
     }
 
     var libraryDateBuckets: [LibraryDateBucket] {
-        let calendar = Calendar.current
-        let grouped = Dictionary(grouping: papers) { paper in
-            calendar.startOfDay(for: paper.addedAt ?? paper.updatedAt ?? paper.publishedAt ?? .distantPast)
+        PaperLibraryDateBuckets.make(for: papers, calendar: .current).map { bucket in
+            LibraryDateBucket(
+                selection: sidebarSelection(for: bucket.filter),
+                title: bucket.title,
+                count: bucket.count
+            )
         }
-        return grouped
-            .map { date, papers in
-                LibraryDateBucket(date: date, title: dateTitle(for: date, calendar: calendar), count: papers.count)
-            }
-            .sorted { $0.date > $1.date }
     }
 
     var renderedPaperDetailHTML: String {
@@ -1048,22 +1050,16 @@ final class AppState: ObservableObject {
         selectedPaperID = papers.first?.id
     }
 
-    private func dateTitle(for date: Date, calendar: Calendar) -> String {
-        if calendar.isDateInToday(date) {
-            return "Today"
+    private func sidebarSelection(for filter: PaperLibraryDateFilter) -> LibrarySidebarSelection {
+        switch filter {
+        case .all:
+            .all
+        case let .day(date):
+            .date(date)
+        case .thisWeek:
+            .thisWeek
         }
-        if calendar.isDateInYesterday(date) {
-            return "Yesterday"
-        }
-        return Self.sidebarDateFormatter.string(from: date)
     }
-
-    private static let sidebarDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
 }
 
 private enum DefaultsKey {

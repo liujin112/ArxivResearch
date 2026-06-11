@@ -71,17 +71,126 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
 public enum PaperLibraryDateFilter: Codable, Hashable, Sendable {
     case all
     case day(Date)
+    case thisWeek(referenceDate: Date)
 
     func contains(_ paper: Paper, calendar: Calendar) -> Bool {
+        guard let date = paper.localLibraryDate else {
+            return self == .all
+        }
         switch self {
         case .all:
             return true
         case let .day(day):
-            guard let date = paper.addedAt ?? paper.updatedAt ?? paper.publishedAt else {
-                return false
-            }
             return calendar.isDate(date, inSameDayAs: day)
+        case let .thisWeek(referenceDate):
+            return Self.isEarlierThisWeek(date, referenceDate: referenceDate, calendar: calendar)
         }
+    }
+
+    private static func isEarlierThisWeek(_ date: Date, referenceDate: Date, calendar: Calendar) -> Bool {
+        guard calendar.isDate(date, equalTo: referenceDate, toGranularity: .weekOfYear),
+              calendar.component(.yearForWeekOfYear, from: date) == calendar.component(.yearForWeekOfYear, from: referenceDate)
+        else {
+            return false
+        }
+        if calendar.isDate(date, inSameDayAs: referenceDate) {
+            return false
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: referenceDate),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return false
+        }
+        return date < calendar.startOfDay(for: referenceDate)
+    }
+}
+
+public struct PaperLibraryDateBucket: Identifiable, Hashable, Sendable {
+    public var id: PaperLibraryDateFilter { filter }
+    public var title: String
+    public var count: Int
+    public var filter: PaperLibraryDateFilter
+
+    public init(title: String, count: Int, filter: PaperLibraryDateFilter) {
+        self.title = title
+        self.count = count
+        self.filter = filter
+    }
+}
+
+public enum PaperLibraryDateBuckets {
+    public static func make(
+        for papers: [Paper],
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> [PaperLibraryDateBucket] {
+        let today = calendar.startOfDay(for: now)
+        let yesterday = calendar.startOfDay(for: calendar.date(byAdding: .day, value: -1, to: today) ?? today)
+        let datedPapers = papers.compactMap { paper -> (paper: Paper, date: Date)? in
+            guard let date = paper.localLibraryDate else { return nil }
+            return (paper, calendar.startOfDay(for: date))
+        }
+        var buckets: [PaperLibraryDateBucket] = []
+
+        let todayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: today) }.count
+        if todayCount > 0 {
+            buckets.append(PaperLibraryDateBucket(title: "Today", count: todayCount, filter: .day(today)))
+        }
+
+        let yesterdayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: yesterday) }.count
+        if yesterdayCount > 0 {
+            buckets.append(PaperLibraryDateBucket(title: "Yesterday", count: yesterdayCount, filter: .day(yesterday)))
+        }
+
+        let thisWeekReference = today
+        let thisWeekFilter = PaperLibraryDateFilter.thisWeek(referenceDate: thisWeekReference)
+        let thisWeekCount = datedPapers.filter {
+            thisWeekFilter.contains($0.paper, calendar: calendar)
+        }.count
+        if thisWeekCount > 0 {
+            buckets.append(PaperLibraryDateBucket(title: "This Week", count: thisWeekCount, filter: thisWeekFilter))
+        }
+
+        let olderDates = datedPapers
+            .filter {
+                !calendar.isDate($0.date, inSameDayAs: today)
+                    && !calendar.isDate($0.date, inSameDayAs: yesterday)
+                    && !thisWeekFilter.contains($0.paper, calendar: calendar)
+            }
+            .map(\.date)
+        let groupedOlderDates = Dictionary(grouping: olderDates) { $0 }
+
+        buckets.append(contentsOf: groupedOlderDates
+            .map { date, dates in
+                PaperLibraryDateBucket(
+                    title: sidebarDateFormatter.string(from: date),
+                    count: dates.count,
+                    filter: .day(date)
+                )
+            }
+            .sorted { lhs, rhs in
+                guard case let .day(lhsDate) = lhs.filter,
+                      case let .day(rhsDate) = rhs.filter
+                else {
+                    return lhs.title < rhs.title
+                }
+                return lhsDate > rhsDate
+            })
+
+        return buckets
+    }
+
+    private static let sidebarDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+}
+
+private extension Paper {
+    var localLibraryDate: Date? {
+        addedAt ?? updatedAt ?? publishedAt
     }
 }
 
