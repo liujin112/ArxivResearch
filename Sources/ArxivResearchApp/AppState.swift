@@ -4,8 +4,8 @@ import ArxivResearchCore
 
 enum LibrarySidebarSelection: Hashable {
     case all
-    case thisWeek
-    case date(Date)
+    case thisWeek(PaperDateField)
+    case date(PaperDateField, Date)
     case query(UUID)
 }
 
@@ -21,6 +21,7 @@ final class AppState: ObservableObject {
     @Published var queryProfiles: [QueryProfile] = []
     @Published var papers: [Paper] = []
     @Published var sidebarSelection: LibrarySidebarSelection = .all
+    @Published var libraryDateField: PaperDateField = .added
     @Published var selectedQueryID: QueryProfile.ID?
     @Published var selectedPaperID: Paper.ID?
     @Published var selectedPaperAnalysis: LLMAnalysis?
@@ -78,11 +79,11 @@ final class AppState: ObservableObject {
     }
 
     var selectedLibraryDateFilter: PaperLibraryDateFilter {
-        if case let .date(date) = sidebarSelection {
-            return .day(date)
+        if case let .date(field, date) = sidebarSelection {
+            return .day(field: field, date: date)
         }
-        if case .thisWeek = sidebarSelection {
-            return .thisWeek(referenceDate: Date())
+        if case let .thisWeek(field) = sidebarSelection {
+            return .thisWeek(field: field, referenceDate: Date())
         }
         return .all
     }
@@ -95,7 +96,7 @@ final class AppState: ObservableObject {
     }
 
     var libraryDateBuckets: [LibraryDateBucket] {
-        PaperLibraryDateBuckets.make(for: papers, calendar: .current).map { bucket in
+        PaperLibraryDateBuckets.make(for: papers, field: libraryDateField, calendar: .current).map { bucket in
             LibraryDateBucket(
                 selection: sidebarSelection(for: bucket.filter),
                 title: bucket.title,
@@ -104,12 +105,17 @@ final class AppState: ObservableObject {
         }
     }
 
-    var libraryPrimaryDateBuckets: [LibraryDateBucket] {
-        Array(libraryDateBuckets.prefix(3))
-    }
-
-    var libraryOlderDateBuckets: [LibraryDateBucket] {
-        Array(libraryDateBuckets.dropFirst(3))
+    var libraryWeekBucket: LibraryDateBucket {
+        let bucket = PaperLibraryDateBuckets.thisWeekBucket(
+            for: papers,
+            field: libraryDateField,
+            calendar: .current
+        )
+        return LibraryDateBucket(
+            selection: sidebarSelection(for: bucket.filter),
+            title: bucket.title,
+            count: bucket.count
+        )
     }
 
     var renderedPaperDetailHTML: String {
@@ -1062,10 +1068,10 @@ final class AppState: ObservableObject {
         switch filter {
         case .all:
             .all
-        case let .day(date):
-            .date(date)
-        case .thisWeek:
-            .thisWeek
+        case let .day(field, date):
+            .date(field, date)
+        case let .thisWeek(field, _):
+            .thisWeek(field)
         }
     }
 }

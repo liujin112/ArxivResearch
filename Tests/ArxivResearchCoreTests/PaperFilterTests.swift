@@ -167,15 +167,15 @@ struct PaperFilterTests {
 
         let result = PaperFilter.apply(
             [other, selected],
-            criteria: PaperFilterCriteria(libraryDate: .day(june11)),
+            criteria: PaperFilterCriteria(libraryDate: .day(field: .added, date: june11)),
             calendar: calendar
         )
 
         #expect(result.map(\.arxivID) == ["2601.00010"])
     }
 
-    @Test("filters papers by this week excluding today and yesterday")
-    func filtersPapersByThisWeekExcludingTodayAndYesterday() throws {
+    @Test("filters papers by this week including today and yesterday")
+    func filtersPapersByThisWeekIncludingTodayAndYesterday() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         calendar.firstWeekday = 2
@@ -187,15 +187,15 @@ struct PaperFilterTests {
 
         let result = PaperFilter.apply(
             [today, yesterday, earlierThisWeek, previousWeek],
-            criteria: PaperFilterCriteria(libraryDate: .thisWeek(referenceDate: thursday)),
+            criteria: PaperFilterCriteria(libraryDate: .thisWeek(field: .added, referenceDate: thursday)),
             calendar: calendar
         )
 
-        #expect(result.map(\.arxivID) == ["2601.00014"])
+        #expect(Set(result.map(\.arxivID)) == Set(["2601.00012", "2601.00013", "2601.00014"]))
     }
 
-    @Test("builds library date buckets in expected sidebar order")
-    func buildsLibraryDateBucketsInExpectedSidebarOrder() throws {
+    @Test("builds exact library date buckets from selected date field")
+    func buildsExactLibraryDateBucketsFromSelectedDateField() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         calendar.firstWeekday = 2
@@ -210,50 +210,98 @@ struct PaperFilterTests {
 
         let buckets = PaperLibraryDateBuckets.make(
             for: papers,
+            field: .added,
             now: thursday,
             calendar: calendar
         )
 
-        #expect(buckets.map(\.title).prefix(4) == ["Today", "Yesterday", "This Week", "Jun 5, 2026"])
-        #expect(buckets.map(\.count) == [1, 1, 2, 1])
-        #expect(buckets.map(\.filter).prefix(3) == [
-            .day(calendar.startOfDay(for: thursday)),
-            .day(calendar.startOfDay(for: date("2026-06-10T12:00:00Z"))),
-            .thisWeek(referenceDate: calendar.startOfDay(for: thursday))
+        #expect(buckets.map(\.title) == ["2026-06-11", "2026-06-10", "2026-06-09", "2026-06-08", "2026-06-05"])
+        #expect(buckets.map(\.count) == [1, 1, 1, 1, 1])
+        #expect(buckets.map(\.filter).prefix(2) == [
+            .day(field: .added, date: calendar.startOfDay(for: thursday)),
+            .day(field: .added, date: calendar.startOfDay(for: date("2026-06-10T12:00:00Z")))
         ])
     }
 
-    @Test("keeps sidebar date shortcuts and ignores papers without local added date")
-    func keepsSidebarDateShortcutsAndIgnoresPapersWithoutAddedAt() throws {
+    @Test("builds date buckets from added published or updated field")
+    func buildsDateBucketsFromSelectedDateField() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         calendar.firstWeekday = 2
         let thursday = date("2026-06-11T12:00:00Z")
-        let paperWithoutAddedAt = Paper(
+        let first = Paper(
             arxivID: "2601.00021",
-            title: "Paper Without Added Date",
+            title: "First",
             abstract: "Abstract",
             authors: ["Ada"],
-            publishedAt: date("2026-06-05T08:00:00Z"),
+            publishedAt: date("2026-05-12T08:00:00Z"),
             updatedAt: date("2026-06-11T08:00:00Z"),
-            addedAt: nil
+            addedAt: date("2026-06-11T07:00:00Z")
+        )
+        let second = Paper(
+            arxivID: "2601.00024",
+            title: "Second",
+            abstract: "Abstract",
+            authors: ["Ada"],
+            publishedAt: date("2026-06-10T08:00:00Z"),
+            updatedAt: date("2026-06-10T09:00:00Z"),
+            addedAt: date("2026-06-10T07:00:00Z")
         )
 
-        let buckets = PaperLibraryDateBuckets.make(
-            for: [paperWithoutAddedAt],
+        let papers = [first, second]
+        let addedBuckets = PaperLibraryDateBuckets.make(for: papers, field: .added, now: thursday, calendar: calendar)
+        let publishedBuckets = PaperLibraryDateBuckets.make(for: papers, field: .published, now: thursday, calendar: calendar)
+        let updatedBuckets = PaperLibraryDateBuckets.make(for: papers, field: .updated, now: thursday, calendar: calendar)
+
+        #expect(addedBuckets.map(\.title) == ["2026-06-11", "2026-06-10"])
+        #expect(publishedBuckets.map(\.title) == ["2026-06-10", "2026-05-12"])
+        #expect(updatedBuckets.map(\.title) == ["2026-06-11", "2026-06-10"])
+    }
+
+    @Test("builds this week library bucket from selected date field")
+    func buildsThisWeekBucketFromSelectedDateField() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        let thursday = date("2026-06-11T12:00:00Z")
+        let todayAddedOldPublished = Paper(
+            arxivID: "2601.00025",
+            title: "Today Added",
+            abstract: "Abstract",
+            authors: ["Ada"],
+            publishedAt: date("2026-06-01T08:00:00Z"),
+            updatedAt: date("2026-06-01T08:00:00Z"),
+            addedAt: date("2026-06-11T08:00:00Z")
+        )
+        let oldAddedTodayPublished = Paper(
+            arxivID: "2601.00026",
+            title: "Today Published",
+            abstract: "Abstract",
+            authors: ["Alan"],
+            publishedAt: date("2026-06-11T08:00:00Z"),
+            updatedAt: date("2026-06-11T08:00:00Z"),
+            addedAt: date("2026-06-01T08:00:00Z")
+        )
+
+        let papers = [todayAddedOldPublished, oldAddedTodayPublished]
+        let addedBucket = PaperLibraryDateBuckets.thisWeekBucket(
+            for: papers,
+            field: .added,
+            now: thursday,
+            calendar: calendar
+        )
+        let publishedBucket = PaperLibraryDateBuckets.thisWeekBucket(
+            for: papers,
+            field: .published,
             now: thursday,
             calendar: calendar
         )
 
-        #expect(buckets.map(\.title) == ["Today", "Yesterday", "This Week"])
-        #expect(buckets.map(\.count) == [0, 0, 0])
-
-        let todayResult = PaperFilter.apply(
-            [paperWithoutAddedAt],
-            criteria: PaperFilterCriteria(libraryDate: .day(calendar.startOfDay(for: thursday))),
-            calendar: calendar
-        )
-        #expect(todayResult.isEmpty)
+        #expect(addedBucket.title == "This Week")
+        #expect(addedBucket.count == 1)
+        #expect(publishedBucket.count == 1)
+        #expect(addedBucket.filter == .thisWeek(field: .added, referenceDate: calendar.startOfDay(for: thursday)))
+        #expect(publishedBucket.filter == .thisWeek(field: .published, referenceDate: calendar.startOfDay(for: thursday)))
     }
 
     @Test("filters date ranges by selected paper date field")

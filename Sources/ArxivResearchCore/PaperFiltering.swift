@@ -120,37 +120,26 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
 
 public enum PaperLibraryDateFilter: Codable, Hashable, Sendable {
     case all
-    case day(Date)
-    case thisWeek(referenceDate: Date)
+    case day(field: PaperDateField, date: Date)
+    case thisWeek(field: PaperDateField, referenceDate: Date)
 
     func contains(_ paper: Paper, calendar: Calendar) -> Bool {
-        guard let date = paper.addedAt else {
-            return self == .all
-        }
         switch self {
         case .all:
             return true
-        case let .day(day):
+        case let .day(field, day):
+            guard let date = field.date(in: paper) else {
+                return false
+            }
             return calendar.isDate(date, inSameDayAs: day)
-        case let .thisWeek(referenceDate):
-            return Self.isEarlierThisWeek(date, referenceDate: referenceDate, calendar: calendar)
+        case let .thisWeek(field, referenceDate):
+            guard let date = field.date(in: paper),
+                  let interval = calendar.dateInterval(of: .weekOfYear, for: referenceDate)
+            else {
+                return false
+            }
+            return date >= interval.start && date < interval.end
         }
-    }
-
-    private static func isEarlierThisWeek(_ date: Date, referenceDate: Date, calendar: Calendar) -> Bool {
-        guard calendar.isDate(date, equalTo: referenceDate, toGranularity: .weekOfYear),
-              calendar.component(.yearForWeekOfYear, from: date) == calendar.component(.yearForWeekOfYear, from: referenceDate)
-        else {
-            return false
-        }
-        if calendar.isDate(date, inSameDayAs: referenceDate) {
-            return false
-        }
-        if let yesterday = calendar.date(byAdding: .day, value: -1, to: referenceDate),
-           calendar.isDate(date, inSameDayAs: yesterday) {
-            return false
-        }
-        return date < calendar.startOfDay(for: referenceDate)
     }
 }
 
@@ -170,65 +159,59 @@ public struct PaperLibraryDateBucket: Identifiable, Hashable, Sendable {
 public enum PaperLibraryDateBuckets {
     public static func make(
         for papers: [Paper],
+        field: PaperDateField,
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> [PaperLibraryDateBucket] {
-        let today = calendar.startOfDay(for: now)
-        let yesterday = calendar.startOfDay(for: calendar.date(byAdding: .day, value: -1, to: today) ?? today)
-        let datedPapers = papers.compactMap { paper -> (paper: Paper, date: Date)? in
-            guard let date = paper.addedAt else { return nil }
-            return (paper, calendar.startOfDay(for: date))
-        }
-
-        let todayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: today) }.count
-        let yesterdayCount = datedPapers.filter { calendar.isDate($0.date, inSameDayAs: yesterday) }.count
-        let thisWeekReference = today
-        let thisWeekFilter = PaperLibraryDateFilter.thisWeek(referenceDate: thisWeekReference)
-        let thisWeekCount = datedPapers.filter {
-            thisWeekFilter.contains($0.paper, calendar: calendar)
-        }.count
-        var buckets: [PaperLibraryDateBucket] = [
-            PaperLibraryDateBucket(title: "Today", count: todayCount, filter: .day(today)),
-            PaperLibraryDateBucket(title: "Yesterday", count: yesterdayCount, filter: .day(yesterday)),
-            PaperLibraryDateBucket(title: "This Week", count: thisWeekCount, filter: thisWeekFilter)
-        ]
-
-        let olderDates = datedPapers
-            .filter {
-                !calendar.isDate($0.date, inSameDayAs: today)
-                    && !calendar.isDate($0.date, inSameDayAs: yesterday)
-                    && !thisWeekFilter.contains($0.paper, calendar: calendar)
+        let dates = papers.compactMap { paper -> Date? in
+            guard let date = field.date(in: paper) else {
+                return nil
             }
-            .map(\.date)
-        let groupedOlderDates = Dictionary(grouping: olderDates) { $0 }
+            return calendar.startOfDay(for: date)
+        }
+        let groupedDates = Dictionary(grouping: dates) { $0 }
 
-        buckets.append(contentsOf: groupedOlderDates
+        return groupedDates
             .map { date, dates in
                 PaperLibraryDateBucket(
-                    title: sidebarDateFormatter.string(from: date),
+                    title: dateTitle(for: date, calendar: calendar),
                     count: dates.count,
-                    filter: .day(date)
+                    filter: .day(field: field, date: date)
                 )
             }
             .sorted { lhs, rhs in
-                guard case let .day(lhsDate) = lhs.filter,
-                      case let .day(rhsDate) = rhs.filter
-                else {
-                    return lhs.title < rhs.title
-                }
-                return lhsDate > rhsDate
-            })
-
-        return buckets
+                date(for: lhs) > date(for: rhs)
+            }
     }
 
-    private static let sidebarDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
+    public static func thisWeekBucket(
+        for papers: [Paper],
+        field: PaperDateField,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> PaperLibraryDateBucket {
+        let referenceDate = calendar.startOfDay(for: now)
+        let filter = PaperLibraryDateFilter.thisWeek(field: field, referenceDate: referenceDate)
+        let count = papers.filter { filter.contains($0, calendar: calendar) }.count
+        return PaperLibraryDateBucket(title: "This Week", count: count, filter: filter)
+    }
+
+    private static func date(for bucket: PaperLibraryDateBucket) -> Date {
+        if case let .day(_, date) = bucket.filter {
+            return date
+        }
+        return .distantPast
+    }
+
+    private static func dateTitle(for date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
 }
 
 public enum PaperSortOption: String, CaseIterable, Codable, Hashable, Sendable {
