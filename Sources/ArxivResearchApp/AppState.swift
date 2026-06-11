@@ -104,6 +104,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    var libraryPrimaryDateBuckets: [LibraryDateBucket] {
+        Array(libraryDateBuckets.prefix(3))
+    }
+
+    var libraryOlderDateBuckets: [LibraryDateBucket] {
+        Array(libraryDateBuckets.dropFirst(3))
+    }
+
     var renderedPaperDetailHTML: String {
         renderer.render(selectedPaperDetailMarkdown)
     }
@@ -513,7 +521,7 @@ final class AppState: ObservableObject {
                     paper.tags = existing.tags
                     paper.zoteroKey = existing.zoteroKey
                     paper.notionPageID = existing.notionPageID
-                    paper.addedAt = existing.addedAt ?? existing.publishedAt ?? existing.updatedAt ?? fetchedAt
+                    paper.addedAt = existing.addedAt ?? fetchedAt
                 }
                 try store.upsertPaper(paper)
                 if shouldQueueSummaries {

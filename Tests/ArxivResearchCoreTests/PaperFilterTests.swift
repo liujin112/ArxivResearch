@@ -34,7 +34,8 @@ struct PaperFilterTests {
                 searchText: "retrieval",
                 status: .interested,
                 tag: "agents",
-                dateRange: .last30Days
+                dateRange: .last30Days,
+                dateField: .updated
             ),
             now: now
         )
@@ -222,15 +223,15 @@ struct PaperFilterTests {
         ])
     }
 
-    @Test("keeps sidebar date shortcuts and groups legacy papers by published date")
-    func keepsSidebarDateShortcutsAndGroupsLegacyPapersByPublishedDate() throws {
+    @Test("keeps sidebar date shortcuts and ignores papers without local added date")
+    func keepsSidebarDateShortcutsAndIgnoresPapersWithoutAddedAt() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         calendar.firstWeekday = 2
         let thursday = date("2026-06-11T12:00:00Z")
-        let legacyPaper = Paper(
+        let paperWithoutAddedAt = Paper(
             arxivID: "2601.00021",
-            title: "Legacy Paper",
+            title: "Paper Without Added Date",
             abstract: "Abstract",
             authors: ["Ada"],
             publishedAt: date("2026-06-05T08:00:00Z"),
@@ -239,20 +240,69 @@ struct PaperFilterTests {
         )
 
         let buckets = PaperLibraryDateBuckets.make(
-            for: [legacyPaper],
+            for: [paperWithoutAddedAt],
             now: thursday,
             calendar: calendar
         )
 
-        #expect(buckets.map(\.title) == ["Today", "Yesterday", "This Week", "Jun 5, 2026"])
-        #expect(buckets.map(\.count) == [0, 0, 0, 1])
+        #expect(buckets.map(\.title) == ["Today", "Yesterday", "This Week"])
+        #expect(buckets.map(\.count) == [0, 0, 0])
 
         let todayResult = PaperFilter.apply(
-            [legacyPaper],
+            [paperWithoutAddedAt],
             criteria: PaperFilterCriteria(libraryDate: .day(calendar.startOfDay(for: thursday))),
             calendar: calendar
         )
         #expect(todayResult.isEmpty)
+    }
+
+    @Test("filters date ranges by selected paper date field")
+    func filtersDateRangesBySelectedPaperDateField() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2
+        let thursday = date("2026-06-11T12:00:00Z")
+        let publishedToday = Paper(
+            arxivID: "2601.00022",
+            title: "Published Today",
+            abstract: "Abstract",
+            authors: ["Ada"],
+            publishedAt: date("2026-06-11T08:00:00Z"),
+            updatedAt: date("2026-06-11T09:00:00Z"),
+            addedAt: date("2026-06-09T08:00:00Z")
+        )
+        let addedToday = Paper(
+            arxivID: "2601.00023",
+            title: "Added Today",
+            abstract: "Abstract",
+            authors: ["Alan"],
+            publishedAt: date("2026-06-09T08:00:00Z"),
+            updatedAt: date("2026-06-11T09:00:00Z"),
+            addedAt: date("2026-06-11T08:00:00Z")
+        )
+
+        let publishedResult = PaperFilter.apply(
+            [publishedToday, addedToday],
+            criteria: PaperFilterCriteria(dateRange: .today, dateField: .published),
+            now: thursday,
+            calendar: calendar
+        )
+        let addedResult = PaperFilter.apply(
+            [publishedToday, addedToday],
+            criteria: PaperFilterCriteria(dateRange: .today, dateField: .added),
+            now: thursday,
+            calendar: calendar
+        )
+        let updatedResult = PaperFilter.apply(
+            [publishedToday, addedToday],
+            criteria: PaperFilterCriteria(dateRange: .today, dateField: .updated),
+            now: thursday,
+            calendar: calendar
+        )
+
+        #expect(publishedResult.map(\.arxivID) == ["2601.00022"])
+        #expect(addedResult.map(\.arxivID) == ["2601.00023"])
+        #expect(Set(updatedResult.map(\.arxivID)) == Set(["2601.00022", "2601.00023"]))
     }
 
     private func paper(_ arxivID: String, addedAt: Date) -> Paper {

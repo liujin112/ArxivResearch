@@ -210,6 +210,7 @@ private struct ToolbarTooltipInstaller: NSViewRepresentable {
 
 struct QuerySidebarView: View {
     @EnvironmentObject private var state: AppState
+    @SceneStorage("library.olderDatesExpanded") private var olderDatesExpanded = false
     @State private var queryPendingDeletion: QueryProfile?
 
     var body: some View {
@@ -218,10 +219,22 @@ struct QuerySidebarView: View {
                 Label("All Papers", systemImage: "tray.full")
                     .badge(state.papers.count)
                     .tag(LibrarySidebarSelection.all)
-                ForEach(state.libraryDateBuckets) { bucket in
+                ForEach(state.libraryPrimaryDateBuckets) { bucket in
                     Label(bucket.title, systemImage: "calendar")
                         .badge(bucket.count)
                         .tag(bucket.selection)
+                }
+                if !state.libraryOlderDateBuckets.isEmpty {
+                    DisclosureGroup(isExpanded: $olderDatesExpanded) {
+                        ForEach(state.libraryOlderDateBuckets) { bucket in
+                            Label(bucket.title, systemImage: "calendar")
+                                .badge(bucket.count)
+                                .tag(bucket.selection)
+                        }
+                    } label: {
+                        Label("Older Dates", systemImage: "calendar.badge.clock")
+                            .badge(state.libraryOlderDateBuckets.reduce(0) { $0 + $1.count })
+                    }
                 }
             }
 
@@ -604,6 +617,7 @@ struct PaperListView: View {
     @SceneStorage("paper.statusFilter") private var statusFilter = "all"
     @SceneStorage("paper.tagFilter") private var tagFiltersRaw = "all"
     @SceneStorage("paper.dateFilter") private var dateFilter = PaperDateRange.all.rawValue
+    @SceneStorage("paper.dateField") private var dateField = PaperDateField.published.rawValue
     @SceneStorage("paper.sortFilter") private var sortFilter = PaperSortOption.dateDescending.rawValue
     @SceneStorage("paper.tagDisplayMode") private var tagDisplayModeRaw = TagDisplayMode.chips.rawValue
 
@@ -614,6 +628,7 @@ struct PaperListView: View {
                 statusFilter: $statusFilter,
                 tagFiltersRaw: $tagFiltersRaw,
                 dateFilter: $dateFilter,
+                dateField: $dateField,
                 sortFilter: $sortFilter,
                 tagDisplayModeRaw: $tagDisplayModeRaw,
                 availableTags: availableTags
@@ -692,6 +707,7 @@ struct PaperListView: View {
             status: statusFilter == "all" ? nil : PaperStatus(rawValue: statusFilter),
             tags: selectedTagFilters,
             dateRange: PaperDateRange(rawValue: dateFilter) ?? .all,
+            dateField: PaperDateField(rawValue: dateField) ?? .published,
             sort: PaperSortOption(rawValue: sortFilter) ?? .dateDescending,
             queryProfileID: state.selectedQueryFilterID,
             libraryDate: state.selectedLibraryDateFilter
@@ -716,6 +732,7 @@ struct PaperFilterBarView: View {
     @Binding var statusFilter: String
     @Binding var tagFiltersRaw: String
     @Binding var dateFilter: String
+    @Binding var dateField: String
     @Binding var sortFilter: String
     @Binding var tagDisplayModeRaw: String
     let availableTags: [String]
@@ -732,6 +749,15 @@ struct PaperFilterBarView: View {
             .padding(.vertical, 7)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
 
+            Picker("Date Field", selection: $dateField) {
+                ForEach(PaperDateField.allCases, id: \.self) { field in
+                    Text(field.displayName).tag(field.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .help("Choose which date field the date range uses")
+
             HStack(spacing: 8) {
                 Picker("Status", selection: $statusFilter) {
                     Text("All Status").tag("all")
@@ -746,7 +772,7 @@ struct PaperFilterBarView: View {
                         Text(range.displayName).tag(range.rawValue)
                     }
                 }
-                .help("Filter by updated or published date")
+                .help("Filter by the selected date field")
 
                 Picker("Sort", selection: $sortFilter) {
                     ForEach(PaperSortOption.allCases, id: \.self) { option in

@@ -2,6 +2,9 @@ import Foundation
 
 public enum PaperDateRange: String, CaseIterable, Codable, Hashable, Sendable {
     case all
+    case today
+    case yesterday
+    case thisWeek
     case last7Days
     case last30Days
     case lastYear
@@ -10,6 +13,12 @@ public enum PaperDateRange: String, CaseIterable, Codable, Hashable, Sendable {
         switch self {
         case .all:
             "All dates"
+        case .today:
+            "Today"
+        case .yesterday:
+            "Yesterday"
+        case .thisWeek:
+            "This Week"
         case .last7Days:
             "Last 7 days"
         case .last30Days:
@@ -19,21 +28,59 @@ public enum PaperDateRange: String, CaseIterable, Codable, Hashable, Sendable {
         }
     }
 
-    func contains(_ date: Date?, now: Date) -> Bool {
+    func contains(_ date: Date?, now: Date, calendar: Calendar) -> Bool {
         guard self != .all else { return true }
         guard let date else { return false }
-        let interval: TimeInterval
         switch self {
         case .all:
             return true
+        case .today:
+            return calendar.isDate(date, inSameDayAs: now)
+        case .yesterday:
+            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: now) else {
+                return false
+            }
+            return calendar.isDate(date, inSameDayAs: yesterday)
+        case .thisWeek:
+            guard let interval = calendar.dateInterval(of: .weekOfYear, for: now) else {
+                return false
+            }
+            return date >= interval.start && date < interval.end
         case .last7Days:
-            interval = 7 * 86_400
+            return date >= now.addingTimeInterval(-7 * 86_400)
         case .last30Days:
-            interval = 30 * 86_400
+            return date >= now.addingTimeInterval(-30 * 86_400)
         case .lastYear:
-            interval = 365 * 86_400
+            return date >= now.addingTimeInterval(-365 * 86_400)
         }
-        return date >= now.addingTimeInterval(-interval)
+    }
+}
+
+public enum PaperDateField: String, CaseIterable, Codable, Hashable, Sendable {
+    case added
+    case published
+    case updated
+
+    public var displayName: String {
+        switch self {
+        case .added:
+            "Added"
+        case .published:
+            "Published"
+        case .updated:
+            "Updated"
+        }
+    }
+
+    func date(in paper: Paper) -> Date? {
+        switch self {
+        case .added:
+            paper.addedAt
+        case .published:
+            paper.publishedAt
+        case .updated:
+            paper.updatedAt
+        }
     }
 }
 
@@ -43,6 +90,7 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
     public var tag: String?
     public var tags: Set<String>
     public var dateRange: PaperDateRange
+    public var dateField: PaperDateField
     public var sort: PaperSortOption
     public var queryProfileID: UUID?
     public var libraryDate: PaperLibraryDateFilter
@@ -53,6 +101,7 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
         tag: String? = nil,
         tags: Set<String> = [],
         dateRange: PaperDateRange = .all,
+        dateField: PaperDateField = .published,
         sort: PaperSortOption = .dateDescending,
         queryProfileID: UUID? = nil,
         libraryDate: PaperLibraryDateFilter = .all
@@ -62,6 +111,7 @@ public struct PaperFilterCriteria: Codable, Hashable, Sendable {
         self.tag = tag
         self.tags = tags
         self.dateRange = dateRange
+        self.dateField = dateField
         self.sort = sort
         self.queryProfileID = queryProfileID
         self.libraryDate = libraryDate
@@ -74,7 +124,7 @@ public enum PaperLibraryDateFilter: Codable, Hashable, Sendable {
     case thisWeek(referenceDate: Date)
 
     func contains(_ paper: Paper, calendar: Calendar) -> Bool {
-        guard let date = paper.localLibraryDate else {
+        guard let date = paper.addedAt else {
             return self == .all
         }
         switch self {
@@ -126,7 +176,7 @@ public enum PaperLibraryDateBuckets {
         let today = calendar.startOfDay(for: now)
         let yesterday = calendar.startOfDay(for: calendar.date(byAdding: .day, value: -1, to: today) ?? today)
         let datedPapers = papers.compactMap { paper -> (paper: Paper, date: Date)? in
-            guard let date = paper.localLibraryDate else { return nil }
+            guard let date = paper.addedAt else { return nil }
             return (paper, calendar.startOfDay(for: date))
         }
 
@@ -179,12 +229,6 @@ public enum PaperLibraryDateBuckets {
         formatter.timeStyle = .none
         return formatter
     }()
-}
-
-private extension Paper {
-    var localLibraryDate: Date? {
-        addedAt ?? publishedAt ?? updatedAt
-    }
 }
 
 public enum PaperSortOption: String, CaseIterable, Codable, Hashable, Sendable {
@@ -247,7 +291,7 @@ public enum PaperFilter {
                     return false
                 }
             }
-            return criteria.dateRange.contains(paper.updatedAt ?? paper.publishedAt, now: now)
+            return criteria.dateRange.contains(criteria.dateField.date(in: paper), now: now, calendar: calendar)
                 && criteria.libraryDate.contains(paper, calendar: calendar)
         }
         return sort(filtered, by: criteria.sort, analysesByPaperID: analysesByPaperID)
