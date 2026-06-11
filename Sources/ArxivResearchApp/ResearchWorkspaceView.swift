@@ -470,17 +470,22 @@ struct QueryEditorSheetView: View {
                         Text(effectiveRawQuery.isEmpty ? "No query terms yet" : effectiveRawQuery)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                            .lineLimit(4)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                         if !previewURL.isEmpty {
-                            Text(previewURL)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                            ScrollView(.horizontal) {
+                                Text(previewURL)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack {
@@ -512,7 +517,7 @@ struct QueryEditorSheetView: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 820, idealWidth: 940, minHeight: 680, idealHeight: 780)
+        .frame(minWidth: 680, idealWidth: 860, maxWidth: 980, minHeight: 600, idealHeight: 720, maxHeight: 820)
     }
 
     private var structuredQuery: StructuredArxivQuery {
@@ -592,8 +597,8 @@ struct QueryExpressionGroupView: View {
             }
             .controlSize(.small)
         }
-        .padding(.leading, depth == 0 ? 0 : 14)
-        .padding(depth == 0 ? 0 : 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(depth == 0 ? 0 : 10)
         .background {
             if depth > 0 {
                 RoundedRectangle(cornerRadius: 6)
@@ -621,39 +626,58 @@ struct QueryExpressionClauseRowView: View {
     let remove: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if isFirst {
-                Text("Start")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 82, alignment: .leading)
-                    .padding(.top, 5)
-            } else {
-                Picker("Operator", selection: $clause.connector) {
-                    ForEach(StructuredQueryConnector.allCases, id: \.self) { connector in
-                        Text(connector.displayName).tag(connector)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 82)
-                .help("Boolean operator before this row")
-            }
-
-            switch clause.node {
-            case .term:
+        switch clause.node {
+        case .term:
+            HStack(alignment: .top, spacing: 8) {
+                connectorControl
                 QueryExpressionTermRowView(term: termBinding)
-            case .group:
+                    .layoutPriority(1)
+                removeButton
+            }
+        case .group:
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    connectorControl
+                    Text("Nested group")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    removeButton
+                }
                 QueryExpressionGroupView(group: groupBinding, title: "Nested Group", depth: depth + 1)
+                    .padding(.leading, 28)
             }
-
-            Button(role: .destructive) {
-                remove()
-            } label: {
-                Image(systemName: "minus.circle")
-            }
-            .buttonStyle(.plain)
-            .help("Remove row")
         }
+    }
+
+    @ViewBuilder
+    private var connectorControl: some View {
+        if isFirst {
+            Text("Start")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 68, alignment: .leading)
+                .padding(.top, 5)
+        } else {
+            Picker("Operator", selection: $clause.connector) {
+                ForEach(StructuredQueryConnector.allCases, id: \.self) { connector in
+                    Text(connector.displayName).tag(connector)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 68)
+            .help("Boolean operator before this row")
+        }
+    }
+
+    private var removeButton: some View {
+        Button(role: .destructive) {
+            remove()
+        } label: {
+            Image(systemName: "minus.circle")
+        }
+        .buttonStyle(.plain)
+        .help("Remove row")
     }
 
     private var termBinding: Binding<StructuredQueryTerm> {
@@ -696,7 +720,7 @@ struct QueryExpressionTermRowView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 180)
+                .frame(width: 138)
                 .help(term.field.helpText)
             }
 
@@ -705,8 +729,9 @@ struct QueryExpressionTermRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 TextField("diffusion model", text: $term.value)
-                    .frame(minWidth: 240)
+                    .frame(minWidth: 140, maxWidth: .infinity)
             }
+            .layoutPriority(1)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Match")
@@ -718,10 +743,11 @@ struct QueryExpressionTermRowView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 150)
+                .frame(width: 124)
                 .help("Phrase adds quotes for exact phrase matching, such as all:\"flow matching\".")
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
