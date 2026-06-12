@@ -11,6 +11,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
     public var providerTopP: Double?
     public var providerConcurrency: Int
     public var providerRetryLimit: Int
+    public var providerValidationFingerprint: String
     public var notionParentPageID: String
     public var notionDatabaseID: String
     public var notionDataSourceID: String
@@ -35,6 +36,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         providerTopP: Double? = nil,
         providerConcurrency: Int = 2,
         providerRetryLimit: Int = 1,
+        providerValidationFingerprint: String = "",
         notionParentPageID: String = "",
         notionDatabaseID: String = "",
         notionDataSourceID: String = "",
@@ -58,6 +60,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         self.providerTopP = providerTopP
         self.providerConcurrency = providerConcurrency
         self.providerRetryLimit = providerRetryLimit
+        self.providerValidationFingerprint = providerValidationFingerprint
         self.notionParentPageID = notionParentPageID
         self.notionDatabaseID = notionDatabaseID
         self.notionDataSourceID = notionDataSourceID
@@ -83,6 +86,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         case providerTopP
         case providerConcurrency
         case providerRetryLimit
+        case providerValidationFingerprint
         case notionParentPageID
         case notionDatabaseID
         case notionDataSourceID
@@ -109,6 +113,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         providerTopP = try container.decodeIfPresent(Double.self, forKey: .providerTopP)
         providerConcurrency = try container.decodeIfPresent(Int.self, forKey: .providerConcurrency) ?? 2
         providerRetryLimit = try container.decodeIfPresent(Int.self, forKey: .providerRetryLimit) ?? 1
+        providerValidationFingerprint = try container.decodeIfPresent(String.self, forKey: .providerValidationFingerprint) ?? ""
         notionParentPageID = try container.decodeIfPresent(String.self, forKey: .notionParentPageID) ?? ""
         notionDatabaseID = try container.decodeIfPresent(String.self, forKey: .notionDatabaseID) ?? ""
         notionDataSourceID = try container.decodeIfPresent(String.self, forKey: .notionDataSourceID) ?? ""
@@ -121,6 +126,72 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         summaryLanguage = try container.decodeIfPresent(SummaryLanguage.self, forKey: .summaryLanguage) ?? .english
         summaryPromptInstructions = try container.decodeIfPresent(String.self, forKey: .summaryPromptInstructions) ?? DefaultPrompts.summaryInstructions
         deepReadPrompt = try container.decodeIfPresent(String.self, forKey: .deepReadPrompt) ?? DefaultPrompts.deepRead
+    }
+
+    public var canQueueSummariesWithoutSecrets: Bool {
+        guard let baseURL = URL(string: providerBaseURL) else {
+            return false
+        }
+        let effectiveKind = LLMProviderFactory.resolvedKind(for: providerKind, baseURL: baseURL)
+        let deploymentName = Self.azureDeploymentName(baseURL: baseURL, configuredDeploymentName: providerDeploymentName, model: providerModel)
+        guard effectiveKind != .azureOpenAI || deploymentName != nil else {
+            return false
+        }
+        guard effectiveKind == .azureOpenAI || !providerModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        let expected = Self.providerValidationFingerprint(
+            kind: effectiveKind,
+            model: providerModel,
+            deploymentName: effectiveKind == .azureOpenAI ? deploymentName ?? "" : "",
+            baseURL: providerBaseURL,
+            apiVersion: providerAPIVersion
+        )
+        return !providerValidationFingerprint.isEmpty && providerValidationFingerprint == expected
+    }
+
+    public static func providerValidationFingerprint(
+        kind: ProviderKind,
+        model: String,
+        deploymentName: String,
+        baseURL: String,
+        apiVersion: String
+    ) -> String {
+        [
+            kind.rawValue,
+            normalizedFingerprintComponent(baseURL),
+            normalizedFingerprintComponent(apiVersion),
+            normalizedFingerprintComponent(model),
+            normalizedFingerprintComponent(deploymentName)
+        ].joined(separator: "|")
+    }
+
+    public static func azureDeploymentName(baseURL: URL, configuredDeploymentName: String, model: String) -> String? {
+        if let deploymentFromURL = extractedAzureDeploymentName(from: baseURL) {
+            return deploymentFromURL
+        }
+        if let configured = nonEmpty(configuredDeploymentName.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return configured
+        }
+        return nonEmpty(model.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func extractedAzureDeploymentName(from baseURL: URL) -> String? {
+        let components = baseURL.pathComponents
+        guard let deploymentsIndex = components.firstIndex(where: { $0.lowercased() == "deployments" }),
+              components.indices.contains(deploymentsIndex + 1)
+        else {
+            return nil
+        }
+        return components[deploymentsIndex + 1].removingPercentEncoding.flatMap(nonEmpty)
+    }
+
+    private static func normalizedFingerprintComponent(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func nonEmpty(_ value: String) -> String? {
+        value.isEmpty ? nil : value
     }
 }
 

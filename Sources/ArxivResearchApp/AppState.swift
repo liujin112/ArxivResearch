@@ -43,6 +43,7 @@ final class AppState: ObservableObject {
     @Published var providerTopPText = ""
     @Published var providerConcurrency = 2
     @Published var providerRetryLimit = 1
+    @Published var providerValidationFingerprint = ""
     @Published var providerAPIKeyDraft = ""
     @Published var notionParentPageID = ""
     @Published var notionDatabaseID = ""
@@ -546,7 +547,7 @@ final class AppState: ObservableObject {
         guard var profile = queryProfiles.first(where: { $0.id == id }), let store else { return }
         selectedQueryID = id
         await runBusy("Fetching arXiv") {
-            let shouldQueueSummaries = try makeAutomationConfiguration().canProcess(.summarizeAbstract)
+            let shouldQueueSummaries = currentRuntimeSettings().canQueueSummariesWithoutSecrets
             let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
@@ -740,6 +741,13 @@ final class AppState: ObservableObject {
                 )
             )
             providerKind = effectiveKind
+            providerValidationFingerprint = RuntimeSettings.providerValidationFingerprint(
+                kind: effectiveKind,
+                model: providerModel,
+                deploymentName: effectiveKind == .azureOpenAI ? azureDeploymentName(for: baseURL) ?? "" : "",
+                baseURL: providerBaseURL,
+                apiVersion: providerAPIVersion
+            )
             try keychain.set(apiKey, for: effectiveKind.rawValue)
             saveSettings()
             statusMessage = "LLM validated and saved"
@@ -907,6 +915,7 @@ final class AppState: ObservableObject {
             providerTopP: parsedProviderTopP,
             providerConcurrency: providerConcurrency,
             providerRetryLimit: providerRetryLimit,
+            providerValidationFingerprint: providerValidationFingerprint,
             notionParentPageID: notionParentPageID,
             notionDatabaseID: notionDatabaseID,
             notionDataSourceID: notionDataSourceID,
@@ -940,6 +949,7 @@ final class AppState: ObservableObject {
         providerTopPText = settings.providerTopP.map { Self.formatNumber($0) } ?? ""
         providerConcurrency = settings.providerConcurrency
         providerRetryLimit = settings.providerRetryLimit
+        providerValidationFingerprint = settings.providerValidationFingerprint
         notionParentPageID = settings.notionParentPageID
         notionDatabaseID = settings.notionDatabaseID
         notionDataSourceID = settings.notionDataSourceID

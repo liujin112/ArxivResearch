@@ -106,12 +106,17 @@ private enum HelperConfiguration {
             autoSyncNotion: settings.notionAutoSync
         )
 
-        if let baseURL = URL(string: settings.providerBaseURL) {
+        if settings.canQueueSummariesWithoutSecrets,
+           let baseURL = URL(string: settings.providerBaseURL) {
             let effectiveKind = LLMProviderFactory.resolvedKind(for: settings.providerKind, baseURL: baseURL)
             let apiKey = (try? keychain.get(effectiveKind.rawValue)).flatMap { $0.isEmpty ? nil : $0 }
                 ?? (effectiveKind == .azureOpenAI ? (try? keychain.get(ProviderKind.openAI.rawValue)).flatMap { $0.isEmpty ? nil : $0 } : nil)
             if let apiKey {
-                let deploymentName = settings.providerDeploymentName.isEmpty ? settings.providerModel : settings.providerDeploymentName
+                let deploymentName = RuntimeSettings.azureDeploymentName(
+                    baseURL: baseURL,
+                    configuredDeploymentName: settings.providerDeploymentName,
+                    model: settings.providerModel
+                )
                 configuration.llmAPIKey = apiKey
                 configuration.llmProvider = LLMProviderFactory.make(config: ProviderConfig(
                     kind: effectiveKind,

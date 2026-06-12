@@ -82,9 +82,14 @@ public final class SQLiteResearchStore {
     }
 
     public func deleteQueryProfile(id: UUID, deleteAssociatedPapers: Bool) throws {
-        if deleteAssociatedPapers {
-            for paper in try fetchPapers() where paper.queryProfileIDs.contains(id) {
+        for paper in try fetchPapers() where paper.queryProfileIDs.contains(id) {
+            let remainingQueryIDs = paper.queryProfileIDs.filter { $0 != id }
+            if deleteAssociatedPapers && remainingQueryIDs.isEmpty {
                 try deletePaper(arxivID: paper.arxivID)
+            } else {
+                var retainedPaper = paper
+                retainedPaper.queryProfileIDs = remainingQueryIDs
+                try upsertPaper(retainedPaper)
             }
         }
         try execute("DELETE FROM query_profiles WHERE id = ?", [.string(id.uuidString)])

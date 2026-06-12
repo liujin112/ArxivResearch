@@ -114,6 +114,28 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchPaper(arxivID: retainedPaper.arxivID) != nil)
     }
 
+    @Test("Deleting a query keeps papers shared with other queries")
+    func deletingQueryWithAssociatedPapersKeepsSharedPapers() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let deletedProfile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        let retainedProfile = QueryProfile(name: "Vision", rawQuery: "all:vision")
+        var deletedOnlyPaper = Paper.fixture(arxivID: "2401.10000")
+        deletedOnlyPaper.queryProfileIDs = [deletedProfile.id]
+        var sharedPaper = Paper.fixture(arxivID: "2401.20000")
+        sharedPaper.queryProfileIDs = [deletedProfile.id, retainedProfile.id]
+
+        try store.upsertQueryProfile(deletedProfile)
+        try store.upsertQueryProfile(retainedProfile)
+        try store.upsertPaper(deletedOnlyPaper)
+        try store.upsertPaper(sharedPaper)
+
+        try store.deleteQueryProfile(id: deletedProfile.id, deleteAssociatedPapers: true)
+
+        #expect(try store.fetchPaper(arxivID: deletedOnlyPaper.arxivID) == nil)
+        let retainedSharedPaper = try #require(try store.fetchPaper(arxivID: sharedPaper.arxivID))
+        #expect(retainedSharedPaper.queryProfileIDs == [retainedProfile.id])
+    }
+
     @Test("Deleting only a query keeps associated papers")
     func deletesQueryWithoutAssociatedPapersWhenRequested() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -126,7 +148,8 @@ struct PersistenceAndAutomationTests {
         try store.deleteQueryProfile(id: profile.id, deleteAssociatedPapers: false)
 
         #expect(try store.fetchQueryProfiles().isEmpty)
-        #expect(try store.fetchPaper(arxivID: paper.arxivID) != nil)
+        let retainedPaper = try #require(try store.fetchPaper(arxivID: paper.arxivID))
+        #expect(retainedPaper.queryProfileIDs.isEmpty)
     }
 
     @Test("App configuration store persists helper-readable non-secret settings")
@@ -162,6 +185,29 @@ struct PersistenceAndAutomationTests {
         try RuntimeSettingsStore(url: url).save(settings)
 
         #expect(try RuntimeSettingsStore(url: url).load() == settings)
+    }
+
+    @Test("Runtime settings decide summary queueing without reading secrets")
+    func runtimeSettingsGateSummaryQueueingWithValidationFingerprint() throws {
+        var settings = RuntimeSettings(
+            providerKind: .openAICompatible,
+            providerModel: "custom-model",
+            providerBaseURL: "https://llm.example.com/v1"
+        )
+
+        #expect(settings.canQueueSummariesWithoutSecrets == false)
+
+        settings.providerValidationFingerprint = RuntimeSettings.providerValidationFingerprint(
+            kind: .openAICompatible,
+            model: "custom-model",
+            deploymentName: "",
+            baseURL: "https://llm.example.com/v1",
+            apiVersion: "2024-10-21"
+        )
+        #expect(settings.canQueueSummariesWithoutSecrets == true)
+
+        settings.providerModel = "changed-model"
+        #expect(settings.canQueueSummariesWithoutSecrets == false)
     }
 
     @Test("LLM analysis parser accepts minimal personalized summary JSON")
