@@ -473,28 +473,42 @@ struct PersistenceAndAutomationTests {
         #expect(try store.latestAnalysis(for: paper.arxivID)?.oneSentenceSummary == "Useful paper.")
     }
 
-    @Test("Automation queues Notion sync after LLM analysis when auto sync is enabled")
+    @Test("Automation drains Notion sync after LLM analysis when auto sync is enabled")
     @MainActor
-    func queuesNotionSyncAfterAnalysisWhenEnabled() async throws {
+    func drainsNotionSyncAfterAnalysisWhenEnabled() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let paper = Paper.fixture(arxivID: "2401.12345")
         try store.upsertPaper(paper)
-        try store.enqueue(SyncJob(kind: .summarizeAbstract, payload: Data(paper.arxivID.utf8)))
+        try store.enqueue(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paper.arxivID))
+        MockURLProtocol.responseData = #"{"id":"paper-page-123"}"#.data(using: .utf8)!
+        MockURLProtocol.statusCode = 200
+        MockURLProtocol.requestCount = 0
         let processor = AutomationJobProcessor(
             store: store,
             configuration: AutomationConfiguration(
                 llmProvider: StubLLMProvider(),
                 llmAPIKey: "test-key",
-                notionClient: StubNotionSyncClient(),
+                notionClient: NotionAPIClient(
+                    config: NotionConfig(
+                        tokenRef: "notion-token",
+                        parentPageID: "parent-page",
+                        databaseID: "db",
+                        dataSourceID: "data-source"
+                    ),
+                    baseURL: URL(string: "https://notion.test")!
+                ),
                 autoSyncNotion: true
-            )
+            ),
+            session: URLSession.mocked
         )
 
         let result = try await processor.runPendingJobs(limit: 10)
 
-        #expect(result.succeeded == 1)
-        let pendingKinds = try store.fetchJobs(state: .pending).map(\.kind)
-        #expect(pendingKinds == [.syncNotion])
+        #expect(result.succeeded == 2)
+        #expect(try store.fetchJobs(state: .pending).isEmpty)
+        #expect(try store.fetchJobs(kind: .syncNotion, state: .succeeded, limit: 10).count == 1)
+        #expect(try store.fetchPaper(arxivID: paper.arxivID)?.notionPageID == "paper-page-123")
+        #expect(MockURLProtocol.requestCount == 1)
     }
 
     @Test("Automation fetch can avoid queuing summaries when LLM is unconfigured")
@@ -775,6 +789,43 @@ private final class RecordingArxivClient: ArxivClient {
                 )
             ]
         )
+    }
+}
+
+private final class MockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var responseData = Data()
+    nonisolated(unsafe) static var statusCode = 200
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: Self.statusCode,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private extension URLSession {
+    static var mocked: URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        return URLSession(configuration: configuration)
     }
 }
 

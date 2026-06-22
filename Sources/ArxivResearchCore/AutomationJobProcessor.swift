@@ -122,16 +122,45 @@ public final class AutomationJobProcessor {
         if recovered > 0 {
             try onJobStateChange?()
         }
-        let jobs = try store.fetchJobs(kind: kind, state: .pending, limit: limit)
-        for job in jobs {
-            guard canProcess(job) else {
-                result.skipped += 1
-                continue
+        let maxJobs = max(1, limit)
+        var completedJobs = 0
+        var skippedJobIDs = Set<SyncJob.ID>()
+
+        while completedJobs < maxJobs {
+            let jobs = try store.fetchJobs(kind: kind, state: .pending, limit: maxJobs)
+            guard !jobs.isEmpty else {
+                break
             }
-            let jobResult = try await runClaimedJob(id: job.id, allowedStates: [.pending])
-            result.succeeded += jobResult.succeeded
-            result.failed += jobResult.failed
-            result.skipped += jobResult.skipped
+
+            var madeProgress = false
+            for job in jobs {
+                guard completedJobs < maxJobs else {
+                    break
+                }
+                guard canProcess(job) else {
+                    if skippedJobIDs.insert(job.id).inserted {
+                        result.skipped += 1
+                    }
+                    continue
+                }
+
+                let jobResult = try await runClaimedJob(id: job.id, allowedStates: [.pending])
+                result.succeeded += jobResult.succeeded
+                result.failed += jobResult.failed
+                if jobResult.skipped > 0, skippedJobIDs.insert(job.id).inserted {
+                    result.skipped += jobResult.skipped
+                }
+
+                let finishedJobs = jobResult.succeeded + jobResult.failed
+                if finishedJobs > 0 {
+                    completedJobs += finishedJobs
+                    madeProgress = true
+                }
+            }
+
+            if !madeProgress {
+                break
+            }
         }
         return result
     }

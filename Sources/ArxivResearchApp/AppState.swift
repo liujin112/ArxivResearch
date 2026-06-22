@@ -67,6 +67,7 @@ final class AppState: ObservableObject {
     private let renderer = MarkdownHTMLRenderer()
     private let defaults = UserDefaults.standard
     private let runtimeSettingsStore = try? RuntimeSettingsStore.default()
+    private var isAutoRunScheduled = false
 
     var selectedPaper: Paper? {
         papers.first { $0.id == selectedPaperID }
@@ -405,7 +406,8 @@ final class AppState: ObservableObject {
             }
             try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paperID))
             try refreshJobCount()
-            statusMessage = "Abstract analysis queued for \(paperID)"
+            statusMessage = "Abstract analysis queued for \(paperID); starting jobs"
+            startQueuedJobsIfIdle()
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -430,7 +432,8 @@ final class AppState: ObservableObject {
             }
             try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .deepRead, paperID: paperID))
             try refreshJobCount()
-            statusMessage = "Deep read queued for \(paperID). Check Jobs, then run pending jobs or wait for Helper."
+            statusMessage = "Deep read queued for \(paperID); starting jobs"
+            startQueuedJobsIfIdle()
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -449,7 +452,8 @@ final class AppState: ObservableObject {
             }
             try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .syncNotion, paperID: paperID))
             try refreshJobCount()
-            statusMessage = "Notion sync queued"
+            statusMessage = "Notion sync queued; starting jobs"
+            startQueuedJobsIfIdle()
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -468,7 +472,8 @@ final class AppState: ObservableObject {
             }
             try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .syncZotero, paperID: paperID))
             try refreshJobCount()
-            statusMessage = "Zotero sync queued"
+            statusMessage = "Zotero sync queued; starting jobs"
+            startQueuedJobsIfIdle()
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -590,6 +595,7 @@ final class AppState: ObservableObject {
                             summaryRunResult.failed += result.failed
                             summaryRunResult.skipped += result.skipped
                         }
+                        try await drainFollowUpJobs(using: processor, into: &summaryRunResult)
                         summaryRunMessage = "; summaries ran: \(summaryRunResult.succeeded) succeeded, \(summaryRunResult.failed) failed, \(summaryRunResult.skipped) skipped"
                     } else {
                         summaryRunMessage = "; summaries queued but LLM is not ready"
@@ -627,7 +633,10 @@ final class AppState: ObservableObject {
                 try self?.refreshJobCount()
             }
             let limit = try store.countJobs(kind: kind, state: .pending) + store.countJobs(kind: kind, state: .running)
-            let result = try await processor.runPendingJobs(limit: max(1, limit), kind: kind)
+            var result = try await processor.runPendingJobs(limit: max(1, limit), kind: kind)
+            if result.succeeded > 0 || result.failed > 0 {
+                try await drainFollowUpJobs(using: processor, into: &result)
+            }
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             try refreshJobCount()
@@ -649,7 +658,8 @@ final class AppState: ObservableObject {
             let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
                 try self?.refreshJobCount()
             }
-            let result = try await processor.runJob(id: jobID)
+            var result = try await processor.runJob(id: jobID)
+            try await drainFollowUpJobs(using: processor, into: &result)
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             try refreshJobCount()
@@ -892,6 +902,37 @@ final class AppState: ObservableObject {
         try store?.recoverStaleRunningJobs()
         pendingJobCount = try store?.countJobs(state: .pending) ?? 0
         recentJobs = try store?.fetchJobs(limit: 40) ?? []
+    }
+
+    private func startQueuedJobsIfIdle() {
+        guard !isWorking, !isAutoRunScheduled else {
+            return
+        }
+        isAutoRunScheduled = true
+        Task { [weak self] in
+            await self?.runAutoQueuedJobs()
+        }
+    }
+
+    private func runAutoQueuedJobs() async {
+        defer { isAutoRunScheduled = false }
+        await runPendingJobs()
+    }
+
+    private func drainFollowUpJobs(
+        using processor: AutomationJobProcessor,
+        into result: inout AutomationJobRunResult
+    ) async throws {
+        guard let store else {
+            return
+        }
+        let limit = try store.countJobs(state: .pending)
+        guard limit > 0 else {
+            return
+        }
+        let followUpResult = try await processor.runPendingJobs(limit: max(20, limit * 2 + 10), kind: nil)
+        result.succeeded += followUpResult.succeeded
+        result.failed += followUpResult.failed
     }
 
     private func runBusy(_ workingMessage: String, operation: () async throws -> Void) async {
