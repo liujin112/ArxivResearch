@@ -227,11 +227,32 @@ public final class SQLiteResearchStore {
     }
 
     public func claimJob(id: UUID, allowedStates: Set<SyncJob.State> = [.pending]) throws -> SyncJob? {
+        try claimJob(id: id, allowedStates: allowedStates, deviceID: nil)
+    }
+
+    public func claimJob(
+        id: UUID,
+        deviceID: String?,
+        now: Date = Date(),
+        allowedStates: Set<SyncJob.State> = [.pending]
+    ) throws -> SyncJob? {
+        try claimJob(id: id, allowedStates: allowedStates, deviceID: deviceID, now: now)
+    }
+
+    private func claimJob(
+        id: UUID,
+        allowedStates: Set<SyncJob.State>,
+        deviceID: String?,
+        now: Date = Date()
+    ) throws -> SyncJob? {
         guard var job = try fetchJob(id: id), allowedStates.contains(job.state) else {
             return nil
         }
         job.state = .running
         job.lastError = nil
+        job.claimedByDeviceID = deviceID
+        job.claimedAt = Self.persistableDate(now)
+        job.completedAt = nil
         let data = try encoder.encode(job)
         let allowed = allowedStates.map(\.rawValue)
         let placeholders = Array(repeating: "?", count: allowed.count).joined(separator: ",")
@@ -271,6 +292,16 @@ public final class SQLiteResearchStore {
         job.state = state
         job.lastError = error
         job.attempts += state == .failed ? 1 : 0
+        switch state {
+        case .succeeded, .failed:
+            job.completedAt = Self.persistableDate(Date())
+        case .pending:
+            job.claimedAt = nil
+            job.claimedByDeviceID = nil
+            job.completedAt = nil
+        case .running:
+            job.completedAt = nil
+        }
         try enqueue(job)
     }
 
@@ -282,6 +313,10 @@ public final class SQLiteResearchStore {
 
     public func fetchCanonicalTags() throws -> [CanonicalTag] {
         try fetchJSON("SELECT json FROM canonical_tags ORDER BY name")
+    }
+
+    private static func persistableDate(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970))
     }
 
     private func upsert<T: Encodable>(table: String, keyColumn: String, key: String, json value: T, uniqueName: String? = nil) throws {

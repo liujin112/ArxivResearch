@@ -76,6 +76,75 @@ struct PersistenceAndAutomationTests {
         #expect(profile.requestRawQuery == "all:agent")
     }
 
+    @Test("Legacy sync job JSON decodes with sync metadata defaults")
+    func decodesLegacySyncJobWithMetadataDefaults() throws {
+        let data = """
+        {
+          "id": "00000000-0000-0000-0000-000000000002",
+          "kind": "summarizeAbstract",
+          "state": "pending",
+          "payload": "MjQwMS4xMjM0NQ==",
+          "attempts": 0,
+          "scheduledAt": "2026-06-22T00:00:00Z"
+        }
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let job = try decoder.decode(SyncJob.self, from: data)
+
+        #expect(job.kind == .summarizeAbstract)
+        #expect(String(data: job.payload, encoding: .utf8) == "2401.12345")
+        #expect(job.idempotencyKey == nil)
+        #expect(job.originDeviceID == nil)
+        #expect(job.claimedByDeviceID == nil)
+        #expect(job.claimedAt == nil)
+        #expect(job.completedAt == nil)
+    }
+
+    @Test("Paper job helper stores typed paper payload and idempotency key")
+    func paperJobHelperStoresTypedPayloadAndIdempotencyKey() throws {
+        let job = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+
+        #expect(job.kind == .summarizeAbstract)
+        #expect(job.idempotencyKey == "summarizeAbstract:2401.12345")
+        #expect(String(data: job.payload, encoding: .utf8) == "2401.12345")
+        #expect(try job.typedPayload() == .paper(id: "2401.12345"))
+    }
+
+    @Test("Claiming a job records lease device metadata")
+    func claimJobRecordsLeaseDeviceMetadata() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let job = SyncJob(kind: .summarizeAbstract, payload: Data("2401.12345".utf8))
+        try store.enqueue(job)
+
+        let claimed = try #require(try store.claimJob(id: job.id, deviceID: "device-a"))
+
+        #expect(claimed.state == .running)
+        #expect(claimed.claimedByDeviceID == "device-a")
+        #expect(claimed.claimedAt != nil)
+        let persisted = try #require(try store.fetchJob(id: job.id))
+        #expect(persisted.claimedByDeviceID == "device-a")
+        #expect(abs(try #require(persisted.claimedAt).timeIntervalSince(try #require(claimed.claimedAt))) < 0.001)
+    }
+
+    @Test("Marking succeeded or failed jobs records completion time")
+    func markJobTerminalStatesRecordCompletionTime() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let succeeded = SyncJob(kind: .summarizeAbstract, payload: Data("2401.12345".utf8))
+        let failed = SyncJob(kind: .syncNotion, payload: Data("2401.12345".utf8))
+        try store.enqueue(succeeded)
+        try store.enqueue(failed)
+
+        try store.markJob(succeeded.id, state: .succeeded)
+        try store.markJob(failed.id, state: .failed, error: "Boom")
+
+        #expect(try store.fetchJob(id: succeeded.id)?.completedAt != nil)
+        let failedJob = try #require(try store.fetchJob(id: failed.id))
+        #expect(failedJob.completedAt != nil)
+        #expect(failedJob.lastError == "Boom")
+    }
+
     @Test("SQLite store deletes paper with related analyses deep reads and paper jobs")
     func deletesPaperCascade() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())

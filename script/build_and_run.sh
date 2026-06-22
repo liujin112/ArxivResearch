@@ -17,6 +17,8 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_HELPERS="$APP_CONTENTS/Helpers"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+ICON_OUTPUT_DIR="$ROOT_DIR/.build/generated/AppIcon"
+APP_ICON="$ICON_OUTPUT_DIR/AppIcon.icns"
 
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT_DIR/.build/ModuleCache}"
 
@@ -26,6 +28,7 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 swift build --product "$APP_PRODUCT"
 swift build --product "$HELPER_PRODUCT"
+swift scripts/generate-app-icon.swift --output "$ICON_OUTPUT_DIR"
 
 BUILD_BIN_DIR="$(swift build --show-bin-path)"
 BUILD_APP_BINARY="$BUILD_BIN_DIR/$APP_PRODUCT"
@@ -35,6 +38,7 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_HELPERS"
 cp "$BUILD_APP_BINARY" "$APP_BINARY"
 cp "$BUILD_HELPER_BINARY" "$APP_HELPERS/$HELPER_PRODUCT"
+cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
 chmod +x "$APP_BINARY" "$APP_HELPERS/$HELPER_PRODUCT"
 
 cat >"$INFO_PLIST" <<PLIST
@@ -54,6 +58,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>

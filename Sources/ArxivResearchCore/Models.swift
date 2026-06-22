@@ -240,6 +240,25 @@ public struct CanonicalTag: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public struct SyncMetadata: Codable, Hashable, Sendable {
+    public var updatedAt: Date
+    public var deletedAt: Date?
+    public var originDeviceID: String?
+    public var revision: Int
+
+    public init(
+        updatedAt: Date = Date(),
+        deletedAt: Date? = nil,
+        originDeviceID: String? = nil,
+        revision: Int = 0
+    ) {
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+        self.originDeviceID = originDeviceID
+        self.revision = revision
+    }
+}
+
 public struct DeepReadReport: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var paperID: String
@@ -271,6 +290,68 @@ public struct DeepReadReport: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public enum SyncJobPayload: Codable, Hashable, Sendable {
+    case paper(id: String)
+    case queryProfile(id: UUID)
+    case raw(String)
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case id
+    }
+
+    enum PayloadType: String, Codable {
+        case paper
+        case queryProfile
+        case raw
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(PayloadType.self, forKey: .type)
+        switch type {
+        case .paper:
+            self = .paper(id: try container.decode(String.self, forKey: .id))
+        case .queryProfile:
+            self = .queryProfile(id: try container.decode(UUID.self, forKey: .id))
+        case .raw:
+            self = .raw(try container.decode(String.self, forKey: .id))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .paper(id):
+            try container.encode(PayloadType.paper, forKey: .type)
+            try container.encode(id, forKey: .id)
+        case let .queryProfile(id):
+            try container.encode(PayloadType.queryProfile, forKey: .type)
+            try container.encode(id, forKey: .id)
+        case let .raw(value):
+            try container.encode(PayloadType.raw, forKey: .type)
+            try container.encode(value, forKey: .id)
+        }
+    }
+}
+
+public enum SyncJobPayloadError: Error, LocalizedError, Sendable {
+    case emptyPaperID
+    case emptyQueryProfileID
+    case unsupportedPaperJobKind(SyncJob.Kind)
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyPaperID:
+            "Paper job payload is empty."
+        case .emptyQueryProfileID:
+            "Query profile job payload is empty."
+        case let .unsupportedPaperJobKind(kind):
+            "\(kind.rawValue) is not a paper-scoped job kind."
+        }
+    }
+}
+
 public struct SyncJob: Identifiable, Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Hashable, Sendable {
         case fetchArxiv
@@ -294,6 +375,11 @@ public struct SyncJob: Identifiable, Codable, Hashable, Sendable {
     public var attempts: Int
     public var scheduledAt: Date
     public var lastError: String?
+    public var idempotencyKey: String?
+    public var originDeviceID: String?
+    public var claimedByDeviceID: String?
+    public var claimedAt: Date?
+    public var completedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -302,7 +388,12 @@ public struct SyncJob: Identifiable, Codable, Hashable, Sendable {
         payload: Data = Data(),
         attempts: Int = 0,
         scheduledAt: Date = Date(),
-        lastError: String? = nil
+        lastError: String? = nil,
+        idempotencyKey: String? = nil,
+        originDeviceID: String? = nil,
+        claimedByDeviceID: String? = nil,
+        claimedAt: Date? = nil,
+        completedAt: Date? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -311,6 +402,135 @@ public struct SyncJob: Identifiable, Codable, Hashable, Sendable {
         self.attempts = attempts
         self.scheduledAt = scheduledAt
         self.lastError = lastError
+        self.idempotencyKey = idempotencyKey
+        self.originDeviceID = originDeviceID
+        self.claimedByDeviceID = claimedByDeviceID
+        self.claimedAt = claimedAt
+        self.completedAt = completedAt
+    }
+
+    public static func paperJob(
+        kind: Kind,
+        paperID: String,
+        id: UUID = UUID(),
+        state: State = .pending,
+        scheduledAt: Date = Date(),
+        originDeviceID: String? = nil
+    ) throws -> SyncJob {
+        let trimmed = paperID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SyncJobPayloadError.emptyPaperID
+        }
+        guard kind.isPaperScoped else {
+            throw SyncJobPayloadError.unsupportedPaperJobKind(kind)
+        }
+        return SyncJob(
+            id: id,
+            kind: kind,
+            state: state,
+            payload: Data(trimmed.utf8),
+            scheduledAt: scheduledAt,
+            idempotencyKey: "\(kind.rawValue):\(trimmed)",
+            originDeviceID: originDeviceID
+        )
+    }
+
+    public static func queryJob(
+        kind: Kind = .fetchArxiv,
+        queryProfileID: UUID,
+        id: UUID = UUID(),
+        state: State = .pending,
+        scheduledAt: Date = Date(),
+        originDeviceID: String? = nil
+    ) -> SyncJob {
+        let payload = queryProfileID.uuidString
+        return SyncJob(
+            id: id,
+            kind: kind,
+            state: state,
+            payload: Data(payload.utf8),
+            scheduledAt: scheduledAt,
+            idempotencyKey: "\(kind.rawValue):\(payload)",
+            originDeviceID: originDeviceID
+        )
+    }
+
+    public func typedPayload() throws -> SyncJobPayload {
+        if let decoded = try? JSONDecoder().decode(SyncJobPayload.self, from: payload) {
+            return decoded
+        }
+        let stringValue = String(data: payload, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if stringValue.isEmpty {
+            throw kind == .fetchArxiv ? SyncJobPayloadError.emptyQueryProfileID : SyncJobPayloadError.emptyPaperID
+        }
+        switch kind {
+        case .fetchArxiv:
+            guard let id = UUID(uuidString: stringValue) else {
+                return .raw(stringValue)
+            }
+            return .queryProfile(id: id)
+        case .summarizeAbstract, .deepRead, .syncNotion, .syncZotero:
+            return .paper(id: stringValue)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case state
+        case payload
+        case attempts
+        case scheduledAt
+        case lastError
+        case idempotencyKey
+        case originDeviceID
+        case claimedByDeviceID
+        case claimedAt
+        case completedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        state = try container.decodeIfPresent(State.self, forKey: .state) ?? .pending
+        payload = try container.decodeIfPresent(Data.self, forKey: .payload) ?? Data()
+        attempts = try container.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        scheduledAt = try container.decodeIfPresent(Date.self, forKey: .scheduledAt) ?? Date(timeIntervalSince1970: 0)
+        lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+        idempotencyKey = try container.decodeIfPresent(String.self, forKey: .idempotencyKey)
+        originDeviceID = try container.decodeIfPresent(String.self, forKey: .originDeviceID)
+        claimedByDeviceID = try container.decodeIfPresent(String.self, forKey: .claimedByDeviceID)
+        claimedAt = try container.decodeIfPresent(Date.self, forKey: .claimedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(state, forKey: .state)
+        try container.encode(payload, forKey: .payload)
+        try container.encode(attempts, forKey: .attempts)
+        try container.encode(scheduledAt, forKey: .scheduledAt)
+        try container.encodeIfPresent(lastError, forKey: .lastError)
+        try container.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
+        try container.encodeIfPresent(originDeviceID, forKey: .originDeviceID)
+        try container.encodeIfPresent(claimedByDeviceID, forKey: .claimedByDeviceID)
+        try container.encodeIfPresent(claimedAt, forKey: .claimedAt)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
+    }
+}
+
+public extension SyncJob.Kind {
+    var isPaperScoped: Bool {
+        switch self {
+        case .summarizeAbstract, .deepRead, .syncNotion, .syncZotero:
+            true
+        case .fetchArxiv:
+            false
+        }
     }
 }
 
