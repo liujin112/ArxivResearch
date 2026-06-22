@@ -140,8 +140,8 @@ public final class ResearchAutomationService {
                     paper.addedAt = existing.addedAt ?? now
                 }
                 try store.upsertPaper(paper)
-                if queueSummaries {
-                    try store.enqueue(SyncJob(kind: .summarizeAbstract, payload: Data(entry.arxivID.utf8)))
+                if queueSummaries, try store.latestAnalysis(for: entry.arxivID) == nil {
+                    try store.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: entry.arxivID))
                 }
             }
             var updatedProfile = profile

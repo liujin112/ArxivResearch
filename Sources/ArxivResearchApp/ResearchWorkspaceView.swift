@@ -1515,8 +1515,8 @@ struct JobStatusPopoverView: View {
                 } label: {
                     Label("Clear", systemImage: "trash")
                 }
-                .disabled(jobs.filter { $0.state != .running }.isEmpty || state.isWorking)
-                .help("Delete all non-running jobs")
+                .disabled(jobs.isEmpty || state.isWorking)
+                .help("Delete all jobs, including stuck running jobs")
             }
             .padding([.horizontal, .top], 14)
             .padding(.bottom, 8)
@@ -1595,8 +1595,8 @@ struct JobBucketView: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
-                .disabled(jobs.filter { $0.state != .running }.isEmpty || state.isWorking)
-                .help("Delete non-running \(title) jobs")
+                .disabled(jobs.isEmpty || state.isWorking)
+                .help("Delete all \(title) jobs, including stuck running jobs")
             }
             if jobs.isEmpty {
                 ContentUnavailableView("No \(title) Jobs", systemImage: systemImage)
@@ -1644,15 +1644,15 @@ struct JobRowView: View {
                     Image(systemName: "play.circle")
                 }
                 .buttonStyle(.borderless)
-                .disabled((job.state != .pending && job.state != .failed) || state.isWorking)
-                .help("Start this job")
+                .disabled((job.state != .pending && job.state != .failed && job.state != .running) || state.isWorking)
+                .help(job.state == .running ? "Restart this running job" : "Start this job")
                 Button(role: .destructive) {
                     state.deleteJob(jobID: job.id)
                 } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
-                .disabled(job.state == .running || state.isWorking)
+                .disabled(state.isWorking)
                 .help("Delete this job")
             }
         }

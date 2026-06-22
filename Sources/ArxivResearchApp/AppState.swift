@@ -403,7 +403,7 @@ final class AppState: ObservableObject {
                 statusMessage = missingConfigurationMessage(for: .summarizeAbstract)
                 return
             }
-            try store?.enqueue(SyncJob(kind: .summarizeAbstract, payload: Data(paperID.utf8)))
+            try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paperID))
             try refreshJobCount()
             statusMessage = "Abstract analysis queued for \(paperID)"
         } catch {
@@ -428,7 +428,7 @@ final class AppState: ObservableObject {
             if let index = papers.firstIndex(where: { $0.id == paperID }) {
                 papers[index] = paper
             }
-            try store?.enqueue(SyncJob(kind: .deepRead, payload: Data(paperID.utf8)))
+            try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .deepRead, paperID: paperID))
             try refreshJobCount()
             statusMessage = "Deep read queued for \(paperID). Check Jobs, then run pending jobs or wait for Helper."
         } catch {
@@ -447,7 +447,7 @@ final class AppState: ObservableObject {
                 statusMessage = missingConfigurationMessage(for: .syncNotion)
                 return
             }
-            try store?.enqueue(SyncJob(kind: .syncNotion, payload: Data(paperID.utf8)))
+            try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .syncNotion, paperID: paperID))
             try refreshJobCount()
             statusMessage = "Notion sync queued"
         } catch {
@@ -466,7 +466,7 @@ final class AppState: ObservableObject {
                 statusMessage = missingConfigurationMessage(for: .syncZotero)
                 return
             }
-            try store?.enqueue(SyncJob(kind: .syncZotero, payload: Data(paperID.utf8)))
+            try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .syncZotero, paperID: paperID))
             try refreshJobCount()
             statusMessage = "Zotero sync queued"
         } catch {
@@ -552,6 +552,8 @@ final class AppState: ObservableObject {
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
             let fetchedAt = Date()
+            var queuedSummaryJobIDs: [SyncJob.ID] = []
+            var seenSummaryJobIDs = Set<SyncJob.ID>()
             for entry in feed.entries {
                 var paper = entry.asPaper(queryProfileID: profile.id)
                 paper.addedAt = fetchedAt
@@ -564,8 +566,36 @@ final class AppState: ObservableObject {
                     paper.addedAt = existing.addedAt ?? fetchedAt
                 }
                 try store.upsertPaper(paper)
-                if shouldQueueSummaries {
-                    try store.enqueue(SyncJob(kind: .summarizeAbstract, payload: Data(entry.arxivID.utf8)))
+                if shouldQueueSummaries, try store.latestAnalysis(for: paper.arxivID) == nil {
+                    let summaryJob = try store.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: entry.arxivID))
+                    if summaryJob.state == .pending, !seenSummaryJobIDs.contains(summaryJob.id) {
+                        queuedSummaryJobIDs.append(summaryJob.id)
+                        seenSummaryJobIDs.insert(summaryJob.id)
+                    }
+                }
+            }
+
+            var summaryRunResult = AutomationJobRunResult()
+            var summaryRunMessage = ""
+            if !queuedSummaryJobIDs.isEmpty {
+                do {
+                    let configuration = try makeAutomationConfiguration()
+                    if configuration.canProcess(.summarizeAbstract) {
+                        let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
+                            try self?.refreshJobCount()
+                        }
+                        for jobID in queuedSummaryJobIDs {
+                            let result = try await processor.runJob(id: jobID, allowRetryFailed: false)
+                            summaryRunResult.succeeded += result.succeeded
+                            summaryRunResult.failed += result.failed
+                            summaryRunResult.skipped += result.skipped
+                        }
+                        summaryRunMessage = "; summaries ran: \(summaryRunResult.succeeded) succeeded, \(summaryRunResult.failed) failed, \(summaryRunResult.skipped) skipped"
+                    } else {
+                        summaryRunMessage = "; summaries queued but LLM is not ready"
+                    }
+                } catch {
+                    summaryRunMessage = "; summaries queued but auto-run failed: \(error.localizedDescription)"
                 }
             }
             profile.lastFetchedAt = Date()
@@ -576,9 +606,11 @@ final class AppState: ObservableObject {
             selectedPaperID = papers.first?.id
             try refreshJobCount()
             try loadSelectedAnalysis()
-            statusMessage = shouldQueueSummaries
-                ? "Fetched \(feed.entries.count) papers and queued summaries"
-                : "Fetched \(feed.entries.count) papers; validate LLM before queuing summaries"
+            if shouldQueueSummaries {
+                statusMessage = "Fetched \(feed.entries.count) papers, queued \(queuedSummaryJobIDs.count) summaries\(summaryRunMessage)"
+            } else {
+                statusMessage = "Fetched \(feed.entries.count) papers; validate LLM before queuing summaries"
+            }
         }
     }
 
@@ -594,7 +626,7 @@ final class AppState: ObservableObject {
             let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
                 try self?.refreshJobCount()
             }
-            let limit = try store.countJobs(kind: kind, state: .pending)
+            let limit = try store.countJobs(kind: kind, state: .pending) + store.countJobs(kind: kind, state: .running)
             let result = try await processor.runPendingJobs(limit: max(1, limit), kind: kind)
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
@@ -644,7 +676,7 @@ final class AppState: ObservableObject {
 
     func clearJobs(kind: SyncJob.Kind? = nil) {
         do {
-            let deleted = try store?.deleteJobs(kind: kind) ?? 0
+            let deleted = try store?.deleteJobs(kind: kind, includingRunning: true) ?? 0
             try refreshJobCount()
             statusMessage = deleted == 1 ? "1 job cleared" : "\(deleted) jobs cleared"
         } catch {
@@ -857,6 +889,7 @@ final class AppState: ObservableObject {
     }
 
     private func refreshJobCount() throws {
+        try store?.recoverStaleRunningJobs()
         pendingJobCount = try store?.countJobs(state: .pending) ?? 0
         recentJobs = try store?.fetchJobs(limit: 40) ?? []
     }

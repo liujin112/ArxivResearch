@@ -172,6 +172,29 @@ public final class SQLiteResearchStore {
         )
     }
 
+    @discardableResult
+    public func enqueueIfNeeded(_ job: SyncJob) throws -> SyncJob {
+        guard let key = effectiveIdempotencyKey(for: job) else {
+            try enqueue(job)
+            return job
+        }
+
+        let existing = try fetchJobs(kind: job.kind, limit: 10_000).first { candidate in
+            guard candidate.state == .pending || candidate.state == .running else {
+                return false
+            }
+            return effectiveIdempotencyKey(for: candidate) == key
+        }
+        if let existing {
+            return existing
+        }
+
+        var job = job
+        job.idempotencyKey = key
+        try enqueue(job)
+        return job
+    }
+
     public func nextPendingJob(now: Date = Date()) throws -> SyncJob? {
         let rows: [SyncJob] = try fetchJSON(
             "SELECT json FROM jobs WHERE state = ? AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 1",
@@ -265,6 +288,27 @@ public final class SQLiteResearchStore {
 
     public func deleteJob(id: UUID) throws {
         try execute("DELETE FROM jobs WHERE id = ?", [.string(id.uuidString)])
+    }
+
+    @discardableResult
+    public func recoverStaleRunningJobs(
+        kind: SyncJob.Kind? = nil,
+        staleAfter: TimeInterval = 30 * 60,
+        now: Date = Date()
+    ) throws -> Int {
+        let runningJobs = try fetchJobs(kind: kind, state: .running, limit: 10_000)
+        var recovered = 0
+        for var job in runningJobs where isStaleRunningJob(job, staleAfter: staleAfter, now: now) {
+            job.state = .pending
+            job.claimedAt = nil
+            job.claimedByDeviceID = nil
+            job.completedAt = nil
+            job.scheduledAt = Self.persistableDate(now)
+            job.lastError = "Recovered stale running job. It can be started again."
+            try enqueue(job)
+            recovered += 1
+        }
+        return recovered
     }
 
     @discardableResult
@@ -392,6 +436,30 @@ public final class SQLiteResearchStore {
             throw SQLiteStoreError.executeFailed(lastError)
         }
         return Int(sqlite3_changes(db))
+    }
+
+    private func effectiveIdempotencyKey(for job: SyncJob) -> String? {
+        if let key = job.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+            return key
+        }
+        guard job.kind.isPaperScoped,
+              let paperID = String(data: job.payload, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !paperID.isEmpty
+        else {
+            return nil
+        }
+        return "\(job.kind.rawValue):\(paperID)"
+    }
+
+    private func isStaleRunningJob(_ job: SyncJob, staleAfter: TimeInterval, now: Date) -> Bool {
+        guard job.state == .running else {
+            return false
+        }
+        guard let claimedAt = job.claimedAt else {
+            return true
+        }
+        return now.timeIntervalSince(claimedAt) >= staleAfter
     }
 
     private func bind(_ values: [SQLiteValue], to statement: OpaquePointer?) throws {

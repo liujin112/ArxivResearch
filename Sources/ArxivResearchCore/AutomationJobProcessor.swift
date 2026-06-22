@@ -100,6 +100,7 @@ public final class AutomationJobProcessor {
     private let contentExtractor: any ContentExtractor
     private let session: URLSession
     private let onJobStateChange: (() throws -> Void)?
+    private static let staleRunningJobTimeout: TimeInterval = 30 * 60
 
     public init(
         store: SQLiteResearchStore,
@@ -117,6 +118,10 @@ public final class AutomationJobProcessor {
 
     public func runPendingJobs(limit: Int = 20, kind: SyncJob.Kind? = nil) async throws -> AutomationJobRunResult {
         var result = AutomationJobRunResult()
+        let recovered = try store.recoverStaleRunningJobs(kind: kind, staleAfter: Self.staleRunningJobTimeout)
+        if recovered > 0 {
+            try onJobStateChange?()
+        }
         let jobs = try store.fetchJobs(kind: kind, state: .pending, limit: limit)
         for job in jobs {
             guard canProcess(job) else {
@@ -132,7 +137,7 @@ public final class AutomationJobProcessor {
     }
 
     public func runJob(id: UUID, allowRetryFailed: Bool = true) async throws -> AutomationJobRunResult {
-        let allowedStates: Set<SyncJob.State> = allowRetryFailed ? [.pending, .failed] : [.pending]
+        let allowedStates: Set<SyncJob.State> = allowRetryFailed ? [.pending, .failed, .running] : [.pending, .running]
         return try await runClaimedJob(id: id, allowedStates: allowedStates)
     }
 
@@ -360,7 +365,7 @@ public final class AutomationJobProcessor {
         guard !existing.contains(where: { $0.payload == payload }) else {
             return
         }
-        try store.enqueue(SyncJob(kind: .syncNotion, payload: payload))
+        try store.enqueueIfNeeded(try SyncJob.paperJob(kind: .syncNotion, paperID: paper.arxivID))
         try onJobStateChange?()
     }
 }

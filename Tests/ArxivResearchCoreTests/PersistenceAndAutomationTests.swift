@@ -145,6 +145,44 @@ struct PersistenceAndAutomationTests {
         #expect(failedJob.lastError == "Boom")
     }
 
+    @Test("SQLite store recovers stale running jobs to pending")
+    func recoversStaleRunningJobsToPending() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var stale = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345", state: .running)
+        stale.claimedAt = now.addingTimeInterval(-3_601)
+        stale.claimedByDeviceID = "old-helper"
+        var active = try SyncJob.paperJob(kind: .deepRead, paperID: "2401.12345", state: .running)
+        active.claimedAt = now.addingTimeInterval(-60)
+        try store.enqueue(stale)
+        try store.enqueue(active)
+
+        let recovered = try store.recoverStaleRunningJobs(staleAfter: 3_600, now: now)
+
+        #expect(recovered == 1)
+        let recoveredJob = try #require(try store.fetchJob(id: stale.id))
+        #expect(recoveredJob.state == .pending)
+        #expect(recoveredJob.claimedAt == nil)
+        #expect(recoveredJob.claimedByDeviceID == nil)
+        #expect(recoveredJob.lastError?.contains("Recovered stale running job") == true)
+        #expect(try store.fetchJob(id: active.id)?.state == .running)
+    }
+
+    @Test("SQLite store deduplicates active paper jobs by idempotency key")
+    func deduplicatesActivePaperJobsByIdempotencyKey() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let first = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        let duplicate = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        try store.enqueue(first)
+
+        let storedDuplicate = try store.enqueueIfNeeded(duplicate)
+
+        #expect(storedDuplicate.id == first.id)
+        let jobs = try store.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10)
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.id == first.id)
+    }
+
     @Test("SQLite store deletes paper with related analyses deep reads and paper jobs")
     func deletesPaperCascade() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -387,6 +425,30 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJob(id: skipped.id)?.state == .pending)
     }
 
+    @Test("Automation can manually restart one running job")
+    @MainActor
+    func restartsSelectedRunningJob() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let paper = Paper.fixture(arxivID: "2401.12345")
+        try store.upsertPaper(paper)
+        let job = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paper.arxivID)
+        try store.enqueue(job)
+        _ = try #require(try store.claimJob(id: job.id))
+        let processor = AutomationJobProcessor(
+            store: store,
+            configuration: AutomationConfiguration(
+                llmProvider: StubLLMProvider(),
+                llmAPIKey: "test-key"
+            )
+        )
+
+        let result = try await processor.runJob(id: job.id)
+
+        #expect(result.succeeded == 1)
+        #expect(try store.fetchJob(id: job.id)?.state == .succeeded)
+        #expect(try store.latestAnalysis(for: paper.arxivID)?.oneSentenceSummary == "Useful paper.")
+    }
+
     @Test("Automation retries transient LLM failures")
     @MainActor
     func retriesTransientLLMFailures() async throws {
@@ -450,6 +512,25 @@ struct PersistenceAndAutomationTests {
 
         #expect(try store.fetchPapers().map(\.arxivID) == ["2401.54321"])
         #expect(try store.fetchJobs().isEmpty)
+    }
+
+    @Test("Automation fetch queues at most one summary job per paper")
+    func automationFetchDeduplicatesSummaryQueue() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        try store.upsertQueryProfile(profile)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: StubArxivClient(),
+            queueSummaries: true
+        )
+
+        try await service.runOnce(now: Date(timeIntervalSince1970: 1_800_000_000))
+        try await service.runOnce(now: Date(timeIntervalSince1970: 1_800_090_000))
+
+        let jobs = try store.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10)
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.idempotencyKey == "summarizeAbstract:2401.54321")
     }
 
     @Test("Automation fetch uses query profile max results and submitted-after filter")
