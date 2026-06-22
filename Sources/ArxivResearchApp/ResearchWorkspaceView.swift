@@ -1636,6 +1636,14 @@ struct JobRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.red)
                     .lineLimit(3)
+                    .textSelection(.enabled)
+                    .help(lastError)
+                    .contextMenu {
+                        Button("Copy Error") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(lastError, forType: .string)
+                        }
+                    }
             }
             HStack(spacing: 8) {
                 Button {

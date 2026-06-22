@@ -260,10 +260,16 @@ public final class AutomationJobProcessor {
         let analysis = try store.latestAnalysis(for: paper.arxivID)
         let deepRead = try store.latestDeepRead(for: paper.arxivID)
         if let pageID = paper.notionPageID, !pageID.isEmpty {
-            _ = try await send(notionClient.buildUpdatePageRequest(pageID: pageID, paper: paper, analysis: analysis, deepRead: deepRead))
-            _ = try await send(notionClient.buildAppendPageContentRequest(pageID: pageID, paper: paper, analysis: analysis, deepRead: deepRead))
+            _ = try await sendNotion(notionClient) {
+                try notionClient.buildUpdatePageRequest(pageID: pageID, paper: paper, analysis: analysis, deepRead: deepRead)
+            }
+            _ = try await sendNotion(notionClient) {
+                try notionClient.buildAppendPageContentRequest(pageID: pageID, paper: paper, analysis: analysis, deepRead: deepRead)
+            }
         } else {
-            let data = try await send(notionClient.buildCreatePageRequest(paper: paper, analysis: analysis, deepRead: deepRead))
+            let data = try await sendNotion(notionClient) {
+                try notionClient.buildCreatePageRequest(paper: paper, analysis: analysis, deepRead: deepRead)
+            }
             if let pageID = NotionResponseParser.createdPageID(from: data) {
                 paper.notionPageID = pageID
                 try store.upsertPaper(paper)
@@ -308,6 +314,24 @@ public final class AutomationJobProcessor {
             throw AutomationError.httpFailure(httpResponse.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
         return data
+    }
+
+    private func sendNotion(
+        _ client: any NotionSyncClient,
+        request buildRequest: () throws -> URLRequest
+    ) async throws -> Data {
+        do {
+            return try await send(buildRequest())
+        } catch let error as AutomationError {
+            guard case let .httpFailure(status, body) = error,
+                  status == 400,
+                  NotionResponseParser.missingPropertyName(from: body) != nil
+            else {
+                throw error
+            }
+            _ = try await send(client.buildEnsurePaperPropertiesRequest())
+            return try await send(buildRequest())
+        }
     }
 
     private func completeLLM(provider: any LLMProvider, apiKey: String, payload: LLMPromptPayload) async throws -> String {

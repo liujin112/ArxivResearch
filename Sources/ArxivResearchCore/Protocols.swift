@@ -20,6 +20,7 @@ public protocol TagCanonicalizer {
 
 public protocol NotionSyncClient: Sendable {
     func buildCreateDatabaseRequest() throws -> URLRequest
+    func buildEnsurePaperPropertiesRequest() throws -> URLRequest
     func buildCreatePageRequest(paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) throws -> URLRequest
     func buildUpsertPageRequest(paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) throws -> URLRequest
     func buildUpdatePageRequest(pageID: String, paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) throws -> URLRequest

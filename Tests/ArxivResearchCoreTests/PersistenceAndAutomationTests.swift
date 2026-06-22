@@ -480,9 +480,15 @@ struct PersistenceAndAutomationTests {
         let paper = Paper.fixture(arxivID: "2401.12345")
         try store.upsertPaper(paper)
         try store.enqueue(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paper.arxivID))
-        MockURLProtocol.responseData = #"{"id":"paper-page-123"}"#.data(using: .utf8)!
-        MockURLProtocol.statusCode = 200
-        MockURLProtocol.requestCount = 0
+        MockURLProtocol.responses = [
+            (
+                400,
+                #"{"object":"error","status":400,"code":"validation_error","message":"Abstract is not a property that exists.","request_id":"request-1"}"#.data(using: .utf8)!
+            ),
+            (200, #"{"object":"data_source","id":"data-source","properties":{}}"#.data(using: .utf8)!),
+            (200, #"{"object":"page","id":"paper-page-123"}"#.data(using: .utf8)!)
+        ]
+        MockURLProtocol.requests = []
         let processor = AutomationJobProcessor(
             store: store,
             configuration: AutomationConfiguration(
@@ -508,7 +514,8 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJobs(state: .pending).isEmpty)
         #expect(try store.fetchJobs(kind: .syncNotion, state: .succeeded, limit: 10).count == 1)
         #expect(try store.fetchPaper(arxivID: paper.arxivID)?.notionPageID == "paper-page-123")
-        #expect(MockURLProtocol.requestCount == 1)
+        #expect(MockURLProtocol.requests.map(\.httpMethod) == ["POST", "PATCH", "POST"])
+        #expect(MockURLProtocol.requests.map { $0.url?.path } == ["/v1/pages", "/v1/data_sources/data-source", "/v1/pages"])
     }
 
     @Test("Automation fetch can avoid queuing summaries when LLM is unconfigured")
@@ -734,6 +741,10 @@ private struct StubNotionSyncClient: NotionSyncClient {
         URLRequest(url: URL(string: "https://notion.example.com")!)
     }
 
+    func buildEnsurePaperPropertiesRequest() throws -> URLRequest {
+        URLRequest(url: URL(string: "https://notion.example.com/data-source")!)
+    }
+
     func buildCreatePageRequest(paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) throws -> URLRequest {
         URLRequest(url: URL(string: "https://notion.example.com/pages")!)
     }
@@ -793,9 +804,8 @@ private final class RecordingArxivClient: ArxivClient {
 }
 
 private final class MockURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var responseData = Data()
-    nonisolated(unsafe) static var statusCode = 200
-    nonisolated(unsafe) static var requestCount = 0
+    nonisolated(unsafe) static var responses: [(statusCode: Int, data: Data)] = []
+    nonisolated(unsafe) static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -806,15 +816,18 @@ private final class MockURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        Self.requestCount += 1
+        Self.requests.append(request)
+        let responseData = Self.responses.isEmpty
+            ? (statusCode: 200, data: Data())
+            : Self.responses.removeFirst()
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: Self.statusCode,
+            statusCode: responseData.statusCode,
             httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Self.responseData)
+        client?.urlProtocol(self, didLoad: responseData.data)
         client?.urlProtocolDidFinishLoading(self)
     }
 

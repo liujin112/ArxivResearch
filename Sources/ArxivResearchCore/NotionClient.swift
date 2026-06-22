@@ -39,6 +39,19 @@ public struct NotionAPIClient: NotionSyncClient {
         return request
     }
 
+    public func buildEnsurePaperPropertiesRequest() throws -> URLRequest {
+        guard let dataSourceID = config.dataSourceID else {
+            throw NotionError.missingDataSource
+        }
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/data_sources/\(dataSourceID)"))
+        applyHeaders(&request)
+        request.httpMethod = "PATCH"
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "properties": databaseProperties()
+        ])
+        return request
+    }
+
     public func buildCreatePageRequest(paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) throws -> URLRequest {
         guard let dataSourceID = config.dataSourceID else {
             throw NotionError.missingDataSource
@@ -285,6 +298,22 @@ public enum NotionResponseParser {
             return nil
         }
         return pageID
+    }
+
+    public static func missingPropertyName(from errorBody: String) -> String? {
+        guard let data = errorBody.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["code"] as? String == "validation_error",
+              let message = object["message"] as? String
+        else {
+            return nil
+        }
+
+        let suffix = " is not a property that exists."
+        guard message.hasSuffix(suffix) else {
+            return nil
+        }
+        return String(message.dropLast(suffix.count))
     }
 }
 

@@ -42,6 +42,21 @@ struct ContentAndSyncTests {
         #expect(String(data: request.httpBody ?? Data(), encoding: .utf8)?.contains(#""is_inline":true"#) == true)
     }
 
+    @Test("Notion ensure properties request patches an existing data source schema")
+    func buildsNotionEnsurePropertiesRequest() throws {
+        let config = NotionConfig(tokenRef: "notion", parentPageID: "page-123", databaseID: "db-123", dataSourceID: "ds-123")
+        let request = try NotionAPIClient(config: config).buildEnsurePaperPropertiesRequest()
+        let body = String(data: request.httpBody ?? Data(), encoding: .utf8) ?? ""
+
+        #expect(request.url?.absoluteString == "https://api.notion.com/v1/data_sources/ds-123")
+        #expect(request.httpMethod == "PATCH")
+        #expect(request.value(forHTTPHeaderField: "Notion-Version") == "2026-03-11")
+        #expect(body.contains(#""properties""#))
+        #expect(body.contains(#""Abstract""#))
+        #expect(body.contains(#""Summary""#))
+        #expect(body.contains(#""Deep Read Status""#))
+    }
+
     @Test("Notion update page request patches the paper entry page")
     func buildsNotionUpdatePageRequest() throws {
         let config = NotionConfig(tokenRef: "notion", parentPageID: "page-123", databaseID: "db-123", dataSourceID: "ds-123")
