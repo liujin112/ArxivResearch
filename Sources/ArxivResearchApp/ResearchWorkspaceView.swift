@@ -767,26 +767,31 @@ struct PaperListView: View {
                 tagFiltersRaw: $tagFiltersRaw,
                 sortFilter: $sortFilter,
                 tagDisplayModeRaw: $tagDisplayModeRaw,
-                availableTags: availableTags
+                availableTags: availableTags,
+                unanalyzedCount: unanalyzedCount,
+                selectedCount: state.selectedPaperIDs.count,
+                analyzeMissing: {
+                    state.analyzeUnanalyzedPapers()
+                },
+                analyzeSelected: {
+                    state.queueSummaries(paperIDs: Array(state.selectedPaperIDs))
+                }
             )
             Divider()
-            List(filteredPapers, selection: $state.selectedPaperID) { paper in
-                Button {
-                    state.selectPaper(paper)
-                } label: {
-                    PaperRowView(
-                        paper: paper,
-                        analysis: state.latestAnalysesByPaperID[paper.arxivID],
-                        tagDisplayMode: tagDisplayMode
-                    )
-                }
-                .buttonStyle(.plain)
+            List(filteredPapers, selection: $state.selectedPaperIDs) { paper in
+                PaperRowView(
+                    paper: paper,
+                    analysis: state.latestAnalysesByPaperID[paper.arxivID],
+                    tagDisplayMode: tagDisplayMode
+                )
+                .contentShape(Rectangle())
                 .tag(paper.id)
                 .contextMenu {
                     Button {
-                        state.queueSummary(paperID: paper.id)
+                        state.queueSummaries(paperIDs: contextPaperIDs(for: paper))
                     } label: {
-                        Label("Analyze Abstract", systemImage: "text.badge.checkmark")
+                        let count = contextPaperIDs(for: paper).count
+                        Label(count > 1 ? "Analyze \(count) Abstracts" : "Analyze Abstract", systemImage: "text.badge.checkmark")
                     }
                     Button {
                         state.queueDeepRead(paperID: paper.id)
@@ -810,14 +815,20 @@ struct PaperListView: View {
                     }
                     Divider()
                     Button {
-                        state.archivePaper(paperID: paper.id)
+                        for paperID in contextPaperIDs(for: paper) {
+                            state.archivePaper(paperID: paperID)
+                        }
                     } label: {
-                        Label("Archive", systemImage: "archivebox")
+                        let count = contextPaperIDs(for: paper).count
+                        Label(count > 1 ? "Archive \(count) Papers" : "Archive", systemImage: "archivebox")
                     }
                     Button(role: .destructive) {
-                        state.deletePaper(paperID: paper.id)
+                        for paperID in contextPaperIDs(for: paper) {
+                            state.deletePaper(paperID: paperID)
+                        }
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        let count = contextPaperIDs(for: paper).count
+                        Label(count > 1 ? "Delete \(count) Papers" : "Delete", systemImage: "trash")
                     }
                 }
             }
@@ -828,10 +839,9 @@ struct PaperListView: View {
                     ContentUnavailableView("No Matches", systemImage: "line.3.horizontal.decrease.circle", description: Text("Adjust search or filters."))
                 }
             }
-            .onChange(of: state.selectedPaperID) {
-                if let id = state.selectedPaperID,
-                   let paper = state.papers.first(where: { $0.id == id }) {
-                    state.selectPaper(paper)
+            .onChange(of: state.selectedPaperIDs) {
+                if let paper = filteredPapers.first(where: { state.selectedPaperIDs.contains($0.id) }) {
+                    state.focusPaper(id: paper.id)
                 }
             }
         }
@@ -851,7 +861,13 @@ struct PaperListView: View {
     }
 
     private var availableTags: [String] {
-        Array(Set(state.papers.flatMap(\.tags))).sorted()
+        Array(Set(state.papers.flatMap { paper in
+            state.latestAnalysesByPaperID[paper.arxivID]?.canonicalTags ?? paper.tags
+        })).sorted()
+    }
+
+    private var unanalyzedCount: Int {
+        state.papers.filter { state.latestAnalysesByPaperID[$0.arxivID] == nil }.count
     }
 
     private var tagDisplayMode: TagDisplayMode {
@@ -860,6 +876,13 @@ struct PaperListView: View {
 
     private var selectedTagFilters: Set<String> {
         TagSelectionCodec.decode(tagFiltersRaw)
+    }
+
+    private func contextPaperIDs(for paper: Paper) -> [Paper.ID] {
+        if state.selectedPaperIDs.contains(paper.id), state.selectedPaperIDs.count > 1 {
+            return filteredPapers.map(\.id).filter { state.selectedPaperIDs.contains($0) }
+        }
+        return [paper.id]
     }
 }
 
@@ -870,6 +893,10 @@ struct PaperFilterBarView: View {
     @Binding var sortFilter: String
     @Binding var tagDisplayModeRaw: String
     let availableTags: [String]
+    let unanalyzedCount: Int
+    let selectedCount: Int
+    let analyzeMissing: () -> Void
+    let analyzeSelected: () -> Void
 
     var body: some View {
         VStack(spacing: 8) {
@@ -905,6 +932,18 @@ struct PaperFilterBarView: View {
                     }
                 }
                 .help("Choose how tags appear in the paper list")
+
+                Button {
+                    if selectedCount > 1 {
+                        analyzeSelected()
+                    } else {
+                        analyzeMissing()
+                    }
+                } label: {
+                    Label(selectedCount > 1 ? "Analyze Selected" : "Analyze Missing", systemImage: "sparkles")
+                }
+                .disabled(selectedCount > 1 ? false : unanalyzedCount == 0)
+                .help(selectedCount > 1 ? "Queue abstract analysis for selected papers" : "Queue and start abstract analysis for all papers without LLM analysis")
             }
             .labelsHidden()
 
@@ -1081,12 +1120,12 @@ struct PaperRowView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text(paper.abstract)
+            Text(summaryPreview)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
-            if !paper.tags.isEmpty {
-                TagStripView(tags: paper.tags, displayMode: tagDisplayMode)
+            if !displayTags.isEmpty {
+                TagStripView(tags: displayTags, displayMode: tagDisplayMode)
             }
             HStack {
                 if let category = paper.primaryCategory {
@@ -1098,6 +1137,16 @@ struct PaperRowView: View {
             .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 6)
+    }
+
+    private var summaryPreview: String {
+        let summary = analysis?.oneSentenceSummary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return summary.isEmpty ? paper.abstract : summary
+    }
+
+    private var displayTags: [String] {
+        let tags = analysis?.canonicalTags ?? paper.tags
+        return tags.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 }
 
@@ -1156,6 +1205,29 @@ struct DetailHeaderView: View {
             .foregroundStyle(.secondary)
             if !tags.isEmpty {
                 TagStripView(tags: tags, displayMode: .chips, layout: .wrap)
+            }
+            if let analysis {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !analysis.oneSentenceSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("LLM Summary")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(analysis.oneSentenceSummary)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                    }
+                    if !analysis.rationale.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Why It Matters")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                        Text(analysis.rationale)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(16)

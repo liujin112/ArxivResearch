@@ -16,6 +16,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
     public var notionDatabaseID: String
     public var notionDataSourceID: String
     public var notionAutoSync: Bool
+    public var activeAnalyzeUnanalyzedPapers: Bool
     public var zoteroLibraryKind: String
     public var zoteroLibraryID: String
     public var zoteroCollectionKey: String
@@ -41,6 +42,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         notionDatabaseID: String = "",
         notionDataSourceID: String = "",
         notionAutoSync: Bool = false,
+        activeAnalyzeUnanalyzedPapers: Bool = true,
         zoteroLibraryKind: String = "user",
         zoteroLibraryID: String = "",
         zoteroCollectionKey: String = "",
@@ -65,6 +67,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         self.notionDatabaseID = notionDatabaseID
         self.notionDataSourceID = notionDataSourceID
         self.notionAutoSync = notionAutoSync
+        self.activeAnalyzeUnanalyzedPapers = activeAnalyzeUnanalyzedPapers
         self.zoteroLibraryKind = zoteroLibraryKind
         self.zoteroLibraryID = zoteroLibraryID
         self.zoteroCollectionKey = zoteroCollectionKey
@@ -91,6 +94,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         case notionDatabaseID
         case notionDataSourceID
         case notionAutoSync
+        case activeAnalyzeUnanalyzedPapers
         case zoteroLibraryKind
         case zoteroLibraryID
         case zoteroCollectionKey
@@ -118,6 +122,7 @@ public struct RuntimeSettings: Codable, Hashable, Sendable {
         notionDatabaseID = try container.decodeIfPresent(String.self, forKey: .notionDatabaseID) ?? ""
         notionDataSourceID = try container.decodeIfPresent(String.self, forKey: .notionDataSourceID) ?? ""
         notionAutoSync = try container.decodeIfPresent(Bool.self, forKey: .notionAutoSync) ?? false
+        activeAnalyzeUnanalyzedPapers = try container.decodeIfPresent(Bool.self, forKey: .activeAnalyzeUnanalyzedPapers) ?? true
         zoteroLibraryKind = try container.decodeIfPresent(String.self, forKey: .zoteroLibraryKind) ?? "user"
         zoteroLibraryID = try container.decodeIfPresent(String.self, forKey: .zoteroLibraryID) ?? ""
         zoteroCollectionKey = try container.decodeIfPresent(String.self, forKey: .zoteroCollectionKey) ?? ""

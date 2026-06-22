@@ -554,6 +554,26 @@ struct PersistenceAndAutomationTests {
         #expect(jobs.first?.idempotencyKey == "summarizeAbstract:2401.54321")
     }
 
+    @Test("Automation queues unanalyzed papers only")
+    func automationQueuesUnanalyzedPapersOnly() throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let analyzed = Paper.fixture(arxivID: "2401.00001")
+        let missing = Paper.fixture(arxivID: "2401.00002")
+        try store.upsertPaper(analyzed)
+        try store.upsertPaper(missing)
+        try store.saveAnalysis(LLMAnalysis.fixture(tags: ["done"]))
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: StubArxivClient(),
+            queueSummaries: true
+        )
+
+        let jobs = try service.queueUnanalyzedSummaries()
+
+        #expect(jobs.map(\.idempotencyKey) == ["summarizeAbstract:2401.00002"])
+        #expect(try store.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10).map(\.idempotencyKey) == ["summarizeAbstract:2401.00002"])
+    }
+
     @Test("Automation fetch uses query profile max results and submitted-after filter")
     func automationFetchUsesQueryProfileRequestSettings() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -658,6 +678,18 @@ struct PersistenceAndAutomationTests {
         #expect(body.contains("data_source_id"))
         #expect(body.contains("2401.99999"))
         #expect(body.contains("llm"))
+        #expect(body.contains("Why It Matters"))
+        #expect(body.contains("Synthetic fixture."))
+    }
+
+    @Test("Notion database request includes why-it-matters property")
+    func buildsNotionDatabaseWithWhyItMattersProperty() throws {
+        let config = NotionConfig(tokenRef: "notion", parentPageID: "page-123", databaseID: nil, dataSourceID: nil)
+        let request = try NotionAPIClient(config: config).buildCreateDatabaseRequest()
+
+        let body = String(data: request.httpBody ?? Data(), encoding: .utf8) ?? ""
+        #expect(body.contains("Why It Matters"))
+        #expect(body.contains("rich_text"))
     }
 
     @Test("Zotero PDF attachment request creates child attachment")

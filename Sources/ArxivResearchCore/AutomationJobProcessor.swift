@@ -13,6 +13,7 @@ public struct AutomationConfiguration {
     public var notionClient: (any NotionSyncClient)?
     public var zoteroClient: (any ZoteroSyncClient)?
     public var autoSyncNotion: Bool
+    public var activeAnalyzeUnanalyzedPapers: Bool
 
     public init(
         llmProvider: (any LLMProvider)? = nil,
@@ -26,7 +27,8 @@ public struct AutomationConfiguration {
         llmRetryLimit: Int = 1,
         notionClient: (any NotionSyncClient)? = nil,
         zoteroClient: (any ZoteroSyncClient)? = nil,
-        autoSyncNotion: Bool = false
+        autoSyncNotion: Bool = false,
+        activeAnalyzeUnanalyzedPapers: Bool = true
     ) {
         self.llmProvider = llmProvider
         self.llmAPIKey = llmAPIKey
@@ -40,6 +42,7 @@ public struct AutomationConfiguration {
         self.notionClient = notionClient
         self.zoteroClient = zoteroClient
         self.autoSyncNotion = autoSyncNotion
+        self.activeAnalyzeUnanalyzedPapers = activeAnalyzeUnanalyzedPapers
     }
 
     public func canProcess(_ kind: SyncJob.Kind) -> Bool {

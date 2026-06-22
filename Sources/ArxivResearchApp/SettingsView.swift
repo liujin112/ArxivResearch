@@ -122,6 +122,25 @@ struct SettingsView: View {
                         Label("Save Analysis Settings", systemImage: "text.badge.checkmark")
                     }
                 }
+
+                Section("Abstract Analysis Automation") {
+                    Toggle("Active analyze unanalyzed papers", isOn: $state.activeAnalyzeUnanalyzedPapers)
+                        .help("When enabled, the app scans papers without abstract analysis and starts summary jobs after the LLM settings are validated.")
+                        .onChange(of: state.activeAnalyzeUnanalyzedPapers) {
+                            state.saveSettings()
+                            if state.activeAnalyzeUnanalyzedPapers {
+                                state.analyzeUnanalyzedPapers()
+                            }
+                        }
+                    Button {
+                        state.saveSettings()
+                        state.analyzeUnanalyzedPapers()
+                    } label: {
+                        Label("Analyze Missing Abstracts Now", systemImage: "sparkles")
+                    }
+                    .disabled(state.isWorking)
+                    .help("Queue and start abstract analysis for every paper that does not have an LLM analysis yet.")
+                }
             }
             }
             .tabItem { Label("Analysis", systemImage: "chart.line.text.clipboard") }

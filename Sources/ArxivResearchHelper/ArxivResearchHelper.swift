@@ -11,6 +11,7 @@ struct ArxivResearchHelper {
             let service = ResearchAutomationService(
                 store: store,
                 queueSummaries: configuration?.canProcess(.summarizeAbstract) == true
+                    && configuration?.activeAnalyzeUnanalyzedPapers == true
             )
             try await service.runOnce()
             if let configuration {
@@ -34,7 +35,8 @@ private enum HelperConfiguration {
             llmTopP: Double(environment["LLM_TOP_P"] ?? ""),
             llmConcurrency: Int(environment["LLM_CONCURRENCY"] ?? "") ?? 2,
             llmRetryLimit: Int(environment["LLM_RETRY_LIMIT"] ?? "") ?? 1,
-            autoSyncNotion: environment["NOTION_AUTO_SYNC"] == "1" || environment["NOTION_AUTO_SYNC"]?.lowercased() == "true"
+            autoSyncNotion: environment["NOTION_AUTO_SYNC"] == "1" || environment["NOTION_AUTO_SYNC"]?.lowercased() == "true",
+            activeAnalyzeUnanalyzedPapers: environment["ACTIVE_ANALYZE_UNANALYZED"]?.lowercased() != "false"
         )
 
         if let apiKey = environment["LLM_API_KEY"],
@@ -103,7 +105,8 @@ private enum HelperConfiguration {
             llmTopP: settings.providerTopP,
             llmConcurrency: settings.providerConcurrency,
             llmRetryLimit: settings.providerRetryLimit,
-            autoSyncNotion: settings.notionAutoSync
+            autoSyncNotion: settings.notionAutoSync,
+            activeAnalyzeUnanalyzedPapers: settings.activeAnalyzeUnanalyzedPapers
         )
 
         if settings.canQueueSummariesWithoutSecrets,

@@ -24,6 +24,7 @@ final class AppState: ObservableObject {
     @Published var libraryDateField: PaperDateField = .added
     @Published var selectedQueryID: QueryProfile.ID?
     @Published var selectedPaperID: Paper.ID?
+    @Published var selectedPaperIDs: Set<Paper.ID> = []
     @Published var selectedPaperAnalysis: LLMAnalysis?
     @Published var latestAnalysesByPaperID: [String: LLMAnalysis] = [:]
     @Published var deepReadMarkdown = ""
@@ -49,6 +50,7 @@ final class AppState: ObservableObject {
     @Published var notionDatabaseID = ""
     @Published var notionDataSourceID = ""
     @Published var notionAutoSync = false
+    @Published var activeAnalyzeUnanalyzedPapers = true
     @Published var notionTokenDraft = ""
     @Published var zoteroLibraryKind = "user"
     @Published var zoteroLibraryID = ""
@@ -167,11 +169,6 @@ final class AppState: ObservableObject {
         markdown += "**Authors:** \(paper.authors.joined(separator: ", "))\n\n"
         markdown += "**arXiv:** \(paper.arxivID)\n\n"
         markdown += "## Abstract\n\n\(paper.abstract)\n\n"
-        if let analysis = selectedPaperAnalysis {
-            markdown += "**Score:** \(RelevanceScore.displayScore(analysis.relevanceScore))/100\n\n"
-            markdown += "## LLM Summary\n\n\(analysis.oneSentenceSummary)\n\n"
-            markdown += "### Why It Matters\n\n\(analysis.rationale)\n"
-        }
         return markdown
     }
 
@@ -206,9 +203,11 @@ final class AppState: ObservableObject {
         selectedQueryID = queryProfiles.first?.id
         sidebarSelection = .all
         selectedPaperID = papers.first?.id
+        selectedPaperIDs = Set(selectedPaperID.map { [$0] } ?? [])
         try refreshJobCount()
         updateQueryPreview()
         try loadSelectedAnalysis()
+        startActiveAnalysisIfNeeded()
     }
 
     func reload() {
@@ -348,8 +347,12 @@ final class AppState: ObservableObject {
             queryProfiles.removeAll { $0.id == id }
             papers = try store?.fetchPapers() ?? papers
             try refreshLatestAnalyses()
+            selectedPaperIDs = Set(selectedPaperIDs.filter { paperID in
+                papers.contains { $0.id == paperID }
+            })
             if let selectedPaperID, !papers.contains(where: { $0.id == selectedPaperID }) {
                 self.selectedPaperID = papers.first?.id
+                selectedPaperIDs = Set(self.selectedPaperID.map { [$0] } ?? [])
                 try loadSelectedAnalysis()
             }
             if case let .query(queryID) = sidebarSelection, queryID == id {
@@ -371,8 +374,16 @@ final class AppState: ObservableObject {
         papers.filter { $0.queryProfileIDs.contains(id) }.count
     }
 
-    func selectPaper(_ paper: Paper) {
-        selectedPaperID = paper.id
+    func selectPaper(_ paper: Paper, replaceSelection: Bool = true) {
+        focusPaper(id: paper.id, replaceSelection: replaceSelection)
+    }
+
+    func focusPaper(id: Paper.ID, replaceSelection: Bool = false) {
+        guard papers.contains(where: { $0.id == id }) else { return }
+        selectedPaperID = id
+        if replaceSelection {
+            selectedPaperIDs = [id]
+        }
         do {
             try loadSelectedAnalysis()
         } catch {
@@ -398,18 +409,73 @@ final class AppState: ObservableObject {
     }
 
     func queueSummary(paperID: Paper.ID) {
-        guard papers.contains(where: { $0.id == paperID }) else { return }
+        queueSummaries(paperIDs: [paperID])
+    }
+
+    func queueSummaries(paperIDs: [Paper.ID]) {
+        let targetIDs = Set(paperIDs)
+        guard !targetIDs.isEmpty else { return }
         do {
             guard try makeAutomationConfiguration().canProcess(.summarizeAbstract) else {
                 statusMessage = missingConfigurationMessage(for: .summarizeAbstract)
                 return
             }
-            try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paperID))
+            var queued = 0
+            for paperID in targetIDs where papers.contains(where: { $0.id == paperID }) {
+                let job = try store?.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paperID))
+                if job?.state == .pending {
+                    queued += 1
+                }
+            }
             try refreshJobCount()
-            statusMessage = "Abstract analysis queued for \(paperID); starting jobs"
-            startQueuedJobsIfIdle()
+            if queued > 0 {
+                statusMessage = queued == 1 ? "Abstract analysis queued; starting jobs" : "\(queued) abstract analyses queued; starting jobs"
+                startQueuedJobsIfIdle()
+            } else {
+                statusMessage = "Selected papers are already queued or running"
+            }
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    func analyzeUnanalyzedPapers() {
+        Task { await analyzeUnanalyzedPapersNow() }
+    }
+
+    func analyzeUnanalyzedPapersNow(paperIDs: Set<Paper.ID>? = nil) async {
+        guard let store else { return }
+        await runBusy("Queuing abstract analysis") {
+            let configuration = try makeAutomationConfiguration()
+            guard configuration.canProcess(.summarizeAbstract) else {
+                statusMessage = missingConfigurationMessage(for: .summarizeAbstract)
+                return
+            }
+            let service = ResearchAutomationService(
+                store: store,
+                arxivClient: ArxivHTTPClient(),
+                queueSummaries: true
+            )
+            let queuedJobs = try service.queueUnanalyzedSummaries(paperIDs: paperIDs)
+            try refreshJobCount()
+            guard !queuedJobs.isEmpty else {
+                statusMessage = "No unanalyzed papers need abstract analysis"
+                return
+            }
+            let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
+                try self?.refreshJobCount()
+            }
+            let limit = try store.countJobs(kind: .summarizeAbstract, state: .pending)
+                + store.countJobs(kind: .summarizeAbstract, state: .running)
+            var result = try await processor.runPendingJobs(limit: max(queuedJobs.count, limit), kind: .summarizeAbstract)
+            if result.succeeded > 0 || result.failed > 0 {
+                try await drainFollowUpJobs(using: processor, into: &result)
+            }
+            papers = try store.fetchPapers()
+            try refreshLatestAnalyses()
+            try refreshJobCount()
+            try loadSelectedAnalysis()
+            statusMessage = "Abstract analysis: \(result.succeeded) succeeded, \(result.failed) failed, \(result.skipped) skipped"
         }
     }
 
@@ -484,8 +550,10 @@ final class AppState: ObservableObject {
             try store?.deletePaper(arxivID: paperID)
             papers.removeAll { $0.id == paperID }
             latestAnalysesByPaperID.removeValue(forKey: paperID)
+            selectedPaperIDs.remove(paperID)
             if selectedPaperID == paperID {
                 selectedPaperID = papers.first?.id
+                selectedPaperIDs = Set(selectedPaperID.map { [$0] } ?? [])
                 try loadSelectedAnalysis()
             }
             try refreshJobCount()
@@ -552,7 +620,8 @@ final class AppState: ObservableObject {
         guard var profile = queryProfiles.first(where: { $0.id == id }), let store else { return }
         selectedQueryID = id
         await runBusy("Fetching arXiv") {
-            let shouldQueueSummaries = currentRuntimeSettings().canQueueSummariesWithoutSecrets
+            let settings = currentRuntimeSettings()
+            let shouldQueueSummaries = settings.activeAnalyzeUnanalyzedPapers && settings.canQueueSummariesWithoutSecrets
             let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
@@ -746,7 +815,10 @@ final class AppState: ObservableObject {
     }
 
     func saveProviderKey() {
-        Task { await validateAndSaveProvider() }
+        Task {
+            await validateAndSaveProvider()
+            startActiveAnalysisIfNeeded()
+        }
     }
 
     func validateAndSaveProvider() async {
@@ -843,6 +915,7 @@ final class AppState: ObservableObject {
         defaults.set(notionDatabaseID, forKey: DefaultsKey.notionDatabaseID)
         defaults.set(notionDataSourceID, forKey: DefaultsKey.notionDataSourceID)
         defaults.set(notionAutoSync, forKey: DefaultsKey.notionAutoSync)
+        defaults.set(activeAnalyzeUnanalyzedPapers, forKey: DefaultsKey.activeAnalyzeUnanalyzedPapers)
         defaults.set(zoteroLibraryKind, forKey: DefaultsKey.zoteroLibraryKind)
         defaults.set(zoteroLibraryID, forKey: DefaultsKey.zoteroLibraryID)
         defaults.set(zoteroCollectionKey, forKey: DefaultsKey.zoteroCollectionKey)
@@ -914,6 +987,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func startActiveAnalysisIfNeeded() {
+        guard activeAnalyzeUnanalyzedPapers,
+              currentRuntimeSettings().canQueueSummariesWithoutSecrets,
+              !isWorking,
+              !isAutoRunScheduled
+        else {
+            return
+        }
+        isAutoRunScheduled = true
+        Task { [weak self] in
+            defer { Task { @MainActor in self?.isAutoRunScheduled = false } }
+            await self?.analyzeUnanalyzedPapersNow()
+        }
+    }
+
     private func runAutoQueuedJobs() async {
         defer { isAutoRunScheduled = false }
         await runPendingJobs()
@@ -966,6 +1054,7 @@ final class AppState: ObservableObject {
             notionDatabaseID: defaults.string(forKey: DefaultsKey.notionDatabaseID) ?? "",
             notionDataSourceID: defaults.string(forKey: DefaultsKey.notionDataSourceID) ?? "",
             notionAutoSync: defaults.bool(forKey: DefaultsKey.notionAutoSync),
+            activeAnalyzeUnanalyzedPapers: defaults.object(forKey: DefaultsKey.activeAnalyzeUnanalyzedPapers) as? Bool ?? true,
             zoteroLibraryKind: defaults.string(forKey: DefaultsKey.zoteroLibraryKind) ?? "user",
             zoteroLibraryID: defaults.string(forKey: DefaultsKey.zoteroLibraryID) ?? "",
             zoteroCollectionKey: defaults.string(forKey: DefaultsKey.zoteroCollectionKey) ?? "",
@@ -994,6 +1083,7 @@ final class AppState: ObservableObject {
             notionDatabaseID: notionDatabaseID,
             notionDataSourceID: notionDataSourceID,
             notionAutoSync: notionAutoSync,
+            activeAnalyzeUnanalyzedPapers: activeAnalyzeUnanalyzedPapers,
             zoteroLibraryKind: zoteroLibraryKind,
             zoteroLibraryID: zoteroLibraryID,
             zoteroCollectionKey: zoteroCollectionKey,
@@ -1028,6 +1118,7 @@ final class AppState: ObservableObject {
         notionDatabaseID = settings.notionDatabaseID
         notionDataSourceID = settings.notionDataSourceID
         notionAutoSync = settings.notionAutoSync
+        activeAnalyzeUnanalyzedPapers = settings.activeAnalyzeUnanalyzedPapers
         zoteroLibraryKind = settings.zoteroLibraryKind
         zoteroLibraryID = settings.zoteroLibraryID
         zoteroCollectionKey = settings.zoteroCollectionKey
@@ -1101,7 +1192,8 @@ final class AppState: ObservableObject {
             llmRetryLimit: providerRetryLimit,
             notionClient: notionClient,
             zoteroClient: zoteroClient,
-            autoSyncNotion: notionAutoSync
+            autoSyncNotion: notionAutoSync,
+            activeAnalyzeUnanalyzedPapers: activeAnalyzeUnanalyzedPapers
         )
     }
 
@@ -1208,6 +1300,7 @@ private enum DefaultsKey {
     static let notionDatabaseID = "notion.databaseID"
     static let notionDataSourceID = "notion.dataSourceID"
     static let notionAutoSync = "notion.autoSync"
+    static let activeAnalyzeUnanalyzedPapers = "analysis.activeAnalyzeUnanalyzedPapers"
     static let zoteroLibraryKind = "zotero.libraryKind"
     static let zoteroLibraryID = "zotero.libraryID"
     static let zoteroCollectionKey = "zotero.collectionKey"

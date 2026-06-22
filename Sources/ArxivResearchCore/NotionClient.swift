@@ -113,6 +113,7 @@ public struct NotionAPIClient: NotionSyncClient {
             "Relevance": ["number": ["format": "number"]],
             "Tags": ["multi_select": [:]],
             "Summary": ["rich_text": [:]],
+            "Why It Matters": ["rich_text": [:]],
             "Deep Read Status": ["select": [:]],
             "Zotero Key": ["rich_text": [:]],
             "Synced At": ["date": [:]]
@@ -137,7 +138,8 @@ public struct NotionAPIClient: NotionSyncClient {
             "Primary Category": ["select": primaryCategorySelect],
             "Status": ["select": ["name": paper.status.rawValue]],
             "Tags": ["multi_select": (analysis?.canonicalTags ?? paper.tags).map { ["name": $0] }],
-            "Summary": ["rich_text": [["text": ["content": analysis?.oneSentenceSummary ?? ""]]]],
+            "Summary": ["rich_text": richTextProperty(analysis?.oneSentenceSummary ?? "")],
+            "Why It Matters": ["rich_text": richTextProperty(analysis?.rationale ?? "")],
             "Deep Read Status": ["select": ["name": deepRead == nil ? "missing" : "ready"]],
             "Zotero Key": ["rich_text": [["text": ["content": paper.zoteroKey ?? ""]]]],
             "Synced At": ["date": ["start": ISO8601DateFormatter().string(from: Date())]]

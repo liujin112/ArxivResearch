@@ -149,6 +149,33 @@ public final class ResearchAutomationService {
             try store.upsertQueryProfile(updatedProfile)
             try await Task.sleep(for: .seconds(3))
         }
+
+        if queueSummaries {
+            _ = try queueUnanalyzedSummaries()
+        }
+    }
+
+    @discardableResult
+    public func queueUnanalyzedSummaries(limit: Int = 500, paperIDs: Set<Paper.ID>? = nil) throws -> [SyncJob] {
+        guard queueSummaries else {
+            return []
+        }
+        let papers = try store.fetchPapers()
+        var queued: [SyncJob] = []
+        for paper in papers {
+            guard queued.count < limit else { break }
+            if let paperIDs, !paperIDs.contains(paper.arxivID) {
+                continue
+            }
+            guard try store.latestAnalysis(for: paper.arxivID) == nil else {
+                continue
+            }
+            let job = try store.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: paper.arxivID))
+            if job.state == .pending {
+                queued.append(job)
+            }
+        }
+        return queued
     }
 }
 
