@@ -30,6 +30,45 @@ struct ContentAndSyncTests {
         #expect(html.contains("<code>code</code>"))
     }
 
+    @Test("Markdown renderer keeps display math and common markdown blocks readable")
+    func rendersReadableMarkdownBlocksAndDisplayMath() throws {
+        let markdown = """
+        # Deep Read
+
+        Intro line with inline \\(x_i\\)
+        continues in the same paragraph.
+
+        \\[
+        y = x + 1
+        \\]
+
+        - first **finding**
+        - second item
+
+        ```python
+        print("ok")
+        ```
+
+        | 项目 | 内容 |
+        |---|---|
+        | 方法 | flow matching |
+        """
+
+        let html = MarkdownHTMLRenderer().render(markdown)
+
+        #expect(html.contains(#"<article class="paper-markdown">"#))
+        #expect(html.contains("<p>Intro line with inline \\(x_i\\)\ncontinues in the same paragraph.</p>"))
+        #expect(html.contains(#"<div class="math-display">"#))
+        #expect(html.contains("\\[\ny = x + 1\n\\]"))
+        #expect(html.contains("<p>\\[</p>") == false)
+        #expect(html.contains("<ul>"))
+        #expect(html.contains("<li>first <strong>finding</strong></li>"))
+        #expect(html.contains(#"<pre><code class="language-python">print(&quot;ok&quot;)"#))
+        #expect(html.contains("<table>"))
+        #expect(html.contains("<th>项目</th>"))
+        #expect(html.contains("<td>flow matching</td>"))
+    }
+
     @Test("Notion create database request uses latest version and data source schema")
     func buildsNotionCreateDatabaseRequest() throws {
         let config = NotionConfig(tokenRef: "notion", parentPageID: "page-123", databaseID: nil, dataSourceID: nil)
@@ -132,6 +171,52 @@ struct ContentAndSyncTests {
         #expect(body.contains(#""type":"equation""#))
         #expect(body.contains(#""expression":"x^2""#))
         #expect(body.contains(#""expression":"y=x+1""#))
+    }
+
+    @Test("Notion deep read markdown renders structured blocks")
+    func notionDeepReadRendersStructuredMarkdownBlocks() throws {
+        let config = NotionConfig(tokenRef: "notion", parentPageID: "page-123", databaseID: "db-123", dataSourceID: "ds-123")
+        let request = try NotionAPIClient(config: config).buildAppendPageContentRequest(
+            pageID: "paper-page-123",
+            paper: .fixture(arxivID: "2401.99999"),
+            analysis: nil,
+            deepRead: DeepReadReport(
+                paperID: "2401.99999",
+                prompt: "Prompt",
+                markdown: """
+                ## 方法概览
+
+                Inline formula $x^2$ remains readable.
+
+                $$
+                y = x + 1
+                $$
+
+                - first **finding**
+                - second item
+
+                ```python
+                print("ok")
+                ```
+
+                | 项目 | 内容 |
+                |---|---|
+                | 方法 | flow \\| matching |
+                """,
+                sourceKind: .html
+            )
+        )
+        let body = String(data: request.httpBody ?? Data(), encoding: .utf8) ?? ""
+
+        #expect(body.contains(#""type":"heading_2""#))
+        #expect(body.contains(#""type":"bulleted_list_item""#))
+        #expect(body.contains(#""type":"code""#))
+        #expect(body.contains(#""language":"python""#))
+        #expect(body.contains(#""type":"table""#))
+        #expect(body.contains(#""type":"table_row""#))
+        #expect(body.contains(#""expression":"x^2""#))
+        #expect(body.contains(#""expression":"y = x + 1""#))
+        #expect(body.contains("flow | matching"))
     }
 
     @Test("Notion create database response parser keeps database and data source IDs")

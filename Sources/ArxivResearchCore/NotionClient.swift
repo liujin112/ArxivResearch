@@ -157,14 +157,10 @@ public struct NotionAPIClient: NotionSyncClient {
     private func pageChildren(paper: Paper, analysis: LLMAnalysis?, deepRead: DeepReadReport?) -> [[String: Any]] {
         var children: [[String: Any]] = []
         if let deepRead {
-            children.append(heading("Deep Read"))
-            children.append(contentsOf: markdownBlocks(deepRead.markdown, limit: 80))
+            children.append(heading(level: 2, text: "Deep Read"))
+            children.append(contentsOf: markdownBlocks(deepRead.markdown, limit: 99))
         }
         return children
-    }
-
-    private func heading(_ text: String) -> [String: Any] {
-        ["object": "block", "type": "heading_2", "heading_2": ["rich_text": textRichText(text)]]
     }
 
     private func paragraph(_ text: String) -> [String: Any] {
@@ -175,47 +171,157 @@ public struct NotionAPIClient: NotionSyncClient {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return [] }
         var blocks: [[String: Any]] = []
-        var current = ""
-        for paragraph in normalized.components(separatedBy: "\n\n") {
+        for block in MarkdownBlockParser().parse(normalized) {
             if blocks.count >= limit { break }
-            if let expression = displayEquationExpression(from: paragraph) {
-                if !current.isEmpty {
-                    blocks.append(self.paragraph(current))
-                    current = ""
-                    if blocks.count >= limit { break }
-                }
-                blocks.append(equation(expression))
-                continue
-            }
-            if current.count + paragraph.count + 2 > 1700, !current.isEmpty {
-                blocks.append(self.paragraph(current))
-                current = paragraph
-            } else {
-                current += current.isEmpty ? paragraph : "\n\n\(paragraph)"
-            }
-        }
-        if !current.isEmpty, blocks.count < limit {
-            blocks.append(paragraph(current))
+            blocks.append(contentsOf: notionBlocks(from: block, remainingLimit: limit - blocks.count))
         }
         return blocks
     }
 
-    private func displayEquationExpression(from paragraph: String) -> String? {
-        let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-        let delimiters = [
-            ("\\[", "\\]"),
-            ("$$", "$$")
-        ]
-        for (opening, closing) in delimiters {
-            guard trimmed.hasPrefix(opening), trimmed.hasSuffix(closing), trimmed.count > opening.count + closing.count else {
-                continue
-            }
-            let start = trimmed.index(trimmed.startIndex, offsetBy: opening.count)
-            let end = trimmed.index(trimmed.endIndex, offsetBy: -closing.count)
-            return trimmed[start..<end]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+    private func notionBlocks(from block: MarkdownBlock, remainingLimit: Int) -> [[String: Any]] {
+        guard remainingLimit > 0 else { return [] }
+        switch block {
+        case let .heading(level, text):
+            return [heading(level: level, text: text)]
+        case let .paragraph(text):
+            return paragraphBlocks(text)
+        case let .unorderedList(items):
+            return items.prefix(remainingLimit).map { listItem(type: "bulleted_list_item", text: $0) }
+        case let .orderedList(items):
+            return items.prefix(remainingLimit).map { listItem(type: "numbered_list_item", text: $0) }
+        case let .codeBlock(language, code):
+            return [codeBlock(language: language, code: code)]
+        case let .quote(text):
+            return [quote(text)]
+        case let .displayMath(expression):
+            return [equation(expression)]
+        case let .table(header, rows):
+            return [table(header: header, rows: rows)]
+        case .horizontalRule:
+            return [divider()]
         }
-        return nil
+    }
+
+    private func heading(level: Int, text: String) -> [String: Any] {
+        let type = "heading_\(min(max(level, 1), 4))"
+        return [
+            "object": "block",
+            "type": type,
+            type: [
+                "rich_text": richText(from: text),
+                "color": "default",
+                "is_toggleable": false
+            ]
+        ]
+    }
+
+    private func paragraphBlocks(_ text: String) -> [[String: Any]] {
+        let chunks = splitLongText(text, limit: 1800)
+        return chunks.map { paragraph($0) }
+    }
+
+    private func listItem(type: String, text: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": type,
+            type: [
+                "rich_text": richText(from: text),
+                "color": "default"
+            ]
+        ]
+    }
+
+    private func codeBlock(language: String, code: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "code",
+            "code": [
+                "caption": [],
+                "rich_text": textRichText(code),
+                "language": notionCodeLanguage(language)
+            ]
+        ]
+    }
+
+    private func quote(_ text: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "quote",
+            "quote": [
+                "rich_text": richText(from: text),
+                "color": "default"
+            ]
+        ]
+    }
+
+    private func table(header: [String], rows: [[String]]) -> [String: Any] {
+        let width = max(1, header.count)
+        let allRows = [normalizedTableRow(header, width: width)] + rows.map { normalizedTableRow($0, width: width) }
+        return [
+            "object": "block",
+            "type": "table",
+            "table": [
+                "table_width": width,
+                "has_column_header": true,
+                "has_row_header": false,
+                "children": allRows.map { tableRow($0) }
+            ]
+        ]
+    }
+
+    private func tableRow(_ cells: [String]) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "table_row",
+            "table_row": [
+                "cells": cells.map { richText(from: $0) }
+            ]
+        ]
+    }
+
+    private func normalizedTableRow(_ row: [String], width: Int) -> [String] {
+        if row.count == width {
+            return row
+        }
+        if row.count > width {
+            return Array(row.prefix(width))
+        }
+        return row + Array(repeating: "", count: width - row.count)
+    }
+
+    private func divider() -> [String: Any] {
+        ["object": "block", "type": "divider", "divider": [:]]
+    }
+
+    private func notionCodeLanguage(_ language: String) -> String {
+        switch language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "", "text", "plain":
+            return "plain text"
+        case "md":
+            return "markdown"
+        case "js":
+            return "javascript"
+        case "ts":
+            return "typescript"
+        case "sh", "zsh":
+            return "shell"
+        case "tex":
+            return "latex"
+        default:
+            return language.lowercased()
+        }
+    }
+
+    private func splitLongText(_ text: String, limit: Int) -> [String] {
+        guard text.count > limit else { return [text] }
+        var chunks: [String] = []
+        var remaining = text[...]
+        while !remaining.isEmpty {
+            let end = remaining.index(remaining.startIndex, offsetBy: min(limit, remaining.count))
+            chunks.append(String(remaining[..<end]))
+            remaining = remaining[end...]
+        }
+        return chunks
     }
 
     private func equation(_ expression: String) -> [String: Any] {
@@ -227,39 +333,132 @@ public struct NotionAPIClient: NotionSyncClient {
     }
 
     private func textRichText(_ text: String) -> [[String: Any]] {
-        [["type": "text", "text": ["content": text]]]
+        var richText: [[String: Any]] = []
+        appendText(text, to: &richText)
+        return richText.isEmpty ? [["type": "text", "text": ["content": ""]]] : richText
     }
 
     private func richText(from text: String) -> [[String: Any]] {
         var richText: [[String: Any]] = []
         var remainder = text[...]
 
-        while let opening = remainder.range(of: "\\(") {
-            let prefix = String(remainder[..<opening.lowerBound])
-            appendText(prefix, to: &richText)
-            let formulaStart = opening.upperBound
-            guard let closing = remainder[formulaStart...].range(of: "\\)") else {
-                appendText(String(remainder[opening.lowerBound...]), to: &richText)
-                return richText
+        while !remainder.isEmpty {
+            let slashOpening = remainder.range(of: "\\(")
+            let dollarOpening = remainder.range(of: #"(?<!\\)\$(?!\$)"#, options: .regularExpression)
+            let opening: (range: Range<String.Index>, closing: String)?
+            switch (slashOpening, dollarOpening) {
+            case let (.some(slash), .some(dollar)):
+                opening = slash.lowerBound < dollar.lowerBound ? (slash, "\\)") : (dollar, "$")
+            case let (.some(slash), .none):
+                opening = (slash, "\\)")
+            case let (.none, .some(dollar)):
+                opening = (dollar, "$")
+            case (.none, .none):
+                appendInlineMarkdown(String(remainder), to: &richText)
+                return richText.isEmpty ? textRichText("") : richText
             }
-            let expression = String(remainder[formulaStart..<closing.lowerBound])
+
+            guard let opening else { break }
+            if opening.range.lowerBound > remainder.startIndex {
+                appendInlineMarkdown(String(remainder[..<opening.range.lowerBound]), to: &richText)
+            }
+            guard let closing = remainder[opening.range.upperBound...].range(of: opening.closing) else {
+                appendInlineMarkdown(String(remainder[opening.range.lowerBound...]), to: &richText)
+                return richText.isEmpty ? textRichText("") : richText
+            }
+            let expression = String(remainder[opening.range.upperBound..<closing.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !expression.isEmpty {
                 richText.append(["type": "equation", "equation": ["expression": expression]])
             }
             remainder = remainder[closing.upperBound...]
         }
-
-        appendText(String(remainder), to: &richText)
         return richText.isEmpty ? textRichText("") : richText
     }
 
-    private func appendText(_ text: String, to richText: inout [[String: Any]]) {
+    private func appendInlineMarkdown(_ text: String, to richText: inout [[String: Any]]) {
+        var remainder = text[...]
+        while !remainder.isEmpty {
+            let candidates: [(Range<String.Index>, InlineToken)] = [
+                firstMatch(pattern: #"`([^`]+)`"#, in: remainder).map { ($0.fullRange, .code($0.groups[0])) },
+                firstMatch(pattern: #"\[([^\]]+)\]\((https?://[^)\s]+)\)"#, in: remainder).map { ($0.fullRange, .link(text: $0.groups[0], url: $0.groups[1])) },
+                firstMatch(pattern: #"\*\*([^*]+)\*\*"#, in: remainder).map { ($0.fullRange, .bold($0.groups[0])) },
+                firstMatch(pattern: #"(?<!\*)\*([^*]+)\*(?!\*)"#, in: remainder).map { ($0.fullRange, .italic($0.groups[0])) }
+            ].compactMap { $0 }
+
+            guard let candidate = candidates.min(by: { $0.0.lowerBound < $1.0.lowerBound }) else {
+                appendText(String(remainder), to: &richText)
+                return
+            }
+            if candidate.0.lowerBound > remainder.startIndex {
+                appendText(String(remainder[..<candidate.0.lowerBound]), to: &richText)
+            }
+            switch candidate.1 {
+            case let .code(value):
+                appendText(value, to: &richText, annotations: ["code": true])
+            case let .link(text, url):
+                appendText(text, to: &richText, link: url)
+            case let .bold(value):
+                appendText(value, to: &richText, annotations: ["bold": true])
+            case let .italic(value):
+                appendText(value, to: &richText, annotations: ["italic": true])
+            }
+            remainder = remainder[candidate.0.upperBound...]
+        }
+    }
+
+    private enum InlineToken {
+        case code(String)
+        case link(text: String, url: String)
+        case bold(String)
+        case italic(String)
+    }
+
+    private func firstMatch(pattern: String, in value: Substring) -> (fullRange: Range<String.Index>, groups: [String])? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let string = String(value)
+        let range = NSRange(string.startIndex..<string.endIndex, in: string)
+        guard let match = regex.firstMatch(in: string, range: range),
+              let fullRangeInString = Range(match.range, in: string)
+        else {
+            return nil
+        }
+        var groups: [String] = []
+        for index in 1..<match.numberOfRanges {
+            guard let groupRangeInString = Range(match.range(at: index), in: string) else {
+                groups.append("")
+                continue
+            }
+            groups.append(String(string[groupRangeInString]))
+        }
+        let lowerOffset = string.distance(from: string.startIndex, to: fullRangeInString.lowerBound)
+        let upperOffset = string.distance(from: string.startIndex, to: fullRangeInString.upperBound)
+        let lower = value.index(value.startIndex, offsetBy: lowerOffset)
+        let upper = value.index(value.startIndex, offsetBy: upperOffset)
+        return (lower..<upper, groups)
+    }
+
+    private func appendText(_ text: String, to richText: inout [[String: Any]], annotations: [String: Bool] = [:], link: String? = nil) {
         guard !text.isEmpty else { return }
         var remaining = text[...]
         while !remaining.isEmpty {
             let end = remaining.index(remaining.startIndex, offsetBy: min(1800, remaining.count))
-            richText.append(["type": "text", "text": ["content": String(remaining[..<end])]])
+            var textObject: [String: Any] = ["content": String(remaining[..<end])]
+            if let link {
+                textObject["link"] = ["url": link]
+            }
+            var item: [String: Any] = ["type": "text", "text": textObject]
+            if !annotations.isEmpty {
+                item["annotations"] = [
+                    "bold": annotations["bold"] ?? false,
+                    "italic": annotations["italic"] ?? false,
+                    "strikethrough": false,
+                    "underline": false,
+                    "code": annotations["code"] ?? false,
+                    "color": "default"
+                ]
+            }
+            richText.append(item)
             remaining = remaining[end...]
         }
     }
