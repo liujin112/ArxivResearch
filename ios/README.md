@@ -24,13 +24,11 @@ Add iCloud capability to the iOS wrapper target before enabling real CloudKit sy
 
 CloudKit record DTOs and transport wiring are outside this file-creation slice. The current mobile UI only displays local state and appends local queue jobs.
 
-## SwiftPM Verification Limits
-
-`Package.swift` has not been updated in this slice, so SwiftPM cannot yet build `ArxivResearchMobileUI` or `ArxivResearchMobileApp` as products. After the package target wiring lands, the expected checks are:
+## SwiftPM Verification
 
 ```sh
 swift build --product ArxivResearchMobileApp
 swift test
 ```
 
-Until then, review is limited to source inspection and syntax care for the new files.
+The SwiftPM executable is useful for build verification and local iteration. A production iOS app should still use an Xcode app target so signing, iCloud, capabilities, launch screens, icons, and distribution settings can be managed normally.

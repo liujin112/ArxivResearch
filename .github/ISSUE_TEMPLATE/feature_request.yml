@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest a workflow or capability for ArxivResearch.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Research workflow
+      description: Describe the paper discovery, reading, analysis, or sync workflow you want to improve.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should the app do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - arXiv fetch/query
+        - LLM analysis
+        - Deep read
+        - Notion sync
+        - Zotero sync
+        - Jobs/automation
+        - macOS UI
+        - iOS/mobile
+        - Build/release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional.

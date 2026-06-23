@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible problem in ArxivResearch.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include API keys, Notion tokens, Zotero tokens, local database files, or private paper contents.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or git commit hash
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: macOS 14.6, Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Configure ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - arXiv fetch/query
+        - LLM analysis
+        - Deep read
+        - Notion sync
+        - Zotero sync
+        - Jobs/automation
+        - macOS UI
+        - iOS/mobile
+        - Build/release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Remove secrets before pasting.
