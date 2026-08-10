@@ -30,6 +30,14 @@ struct ContentAndSyncTests {
         #expect(html.contains("<code>code</code>"))
     }
 
+    @Test("Markdown renderer skips the remote math runtime when math is absent")
+    func skipsMathRuntimeForOrdinaryMarkdown() throws {
+        let html = MarkdownHTMLRenderer().render("# Summary\n\nA paper without equations.")
+
+        #expect(!html.contains("window.MathJax"))
+        #expect(!html.contains("cdn.jsdelivr.net/npm/mathjax"))
+    }
+
     @Test("Markdown renderer keeps display math and common markdown blocks readable")
     func rendersReadableMarkdownBlocksAndDisplayMath() throws {
         let markdown = """

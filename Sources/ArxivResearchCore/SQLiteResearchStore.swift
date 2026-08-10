@@ -5,8 +5,14 @@ public final class SQLiteResearchStore {
     private var db: OpaquePointer?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let onStatementPrepared: ((String) -> Void)?
 
-    public init(path: URL) throws {
+    public convenience init(path: URL) throws {
+        try self.init(path: path, onStatementPrepared: nil)
+    }
+
+    init(path: URL, onStatementPrepared: ((String) -> Void)?) throws {
+        self.onStatementPrepared = onStatementPrepared
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
         if sqlite3_open(path.path, &db) != SQLITE_OK {
@@ -22,51 +28,85 @@ public final class SQLiteResearchStore {
     }
 
     public func migrate() throws {
-        try execute("""
-        CREATE TABLE IF NOT EXISTS query_profiles (
-            id TEXT PRIMARY KEY,
-            json TEXT NOT NULL
-        );
-        """)
-        try execute("""
-        CREATE TABLE IF NOT EXISTS papers (
-            arxiv_id TEXT PRIMARY KEY,
-            json TEXT NOT NULL,
-            updated_at TEXT
-        );
-        """)
-        try execute("""
-        CREATE TABLE IF NOT EXISTS analyses (
-            id TEXT PRIMARY KEY,
-            paper_id TEXT NOT NULL,
-            json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """)
-        try execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            state TEXT NOT NULL,
-            json TEXT NOT NULL,
-            scheduled_at REAL NOT NULL
-        );
-        """)
-        try execute("""
-        CREATE TABLE IF NOT EXISTS canonical_tags (
-            id TEXT PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            json TEXT NOT NULL
-        );
-        """)
-        try execute("""
-        CREATE TABLE IF NOT EXISTS deep_reads (
-            id TEXT PRIMARY KEY,
-            paper_id TEXT NOT NULL,
-            json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """)
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try execute("""
+            CREATE TABLE IF NOT EXISTS query_profiles (
+                id TEXT PRIMARY KEY,
+                json TEXT NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS papers (
+                arxiv_id TEXT PRIMARY KEY,
+                json TEXT NOT NULL,
+                updated_at TEXT
+            );
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS query_fetch_leases (
+                query_profile_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS analyses (
+                id TEXT PRIMARY KEY,
+                paper_id TEXT NOT NULL,
+                json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE INDEX IF NOT EXISTS analyses_latest_by_paper
+            ON analyses(paper_id, created_at DESC, id DESC);
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                json TEXT NOT NULL,
+                scheduled_at REAL NOT NULL,
+                idempotency_key TEXT
+            );
+            """)
+            if try !table("jobs", hasColumn: "idempotency_key") {
+                try execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT;")
+            }
+            try execute("DROP INDEX IF EXISTS jobs_active_idempotency_key;")
+            try backfillJobIdempotencyKeys()
+            try resolveDuplicateActiveJobs()
+            try execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_idempotency_key
+            ON jobs(idempotency_key)
+            WHERE idempotency_key IS NOT NULL AND state IN ('pending', 'running');
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS canonical_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                json TEXT NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS deep_reads (
+                id TEXT PRIMARY KEY,
+                paper_id TEXT NOT NULL,
+                json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE INDEX IF NOT EXISTS deep_reads_latest_by_paper
+            ON deep_reads(paper_id, created_at DESC, id DESC);
+            """)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     public func upsertQueryProfile(_ profile: QueryProfile) throws {
@@ -75,6 +115,51 @@ public final class SQLiteResearchStore {
 
     public func fetchQueryProfiles() throws -> [QueryProfile] {
         try fetchJSON("SELECT json FROM query_profiles ORDER BY json")
+    }
+
+    public func fetchQueryProfile(id: UUID) throws -> QueryProfile? {
+        let rows: [QueryProfile] = try fetchJSON(
+            "SELECT json FROM query_profiles WHERE id = ? LIMIT 1",
+            [.string(id.uuidString)]
+        )
+        return rows.first
+    }
+
+    /// Acquires a cross-process lease so the app and helper cannot fetch the same
+    /// subscription concurrently. Expired leases are replaced atomically.
+    @discardableResult
+    public func claimQueryFetch(
+        profileID: UUID,
+        ownerID: String,
+        now: Date = Date(),
+        leaseDuration: TimeInterval = 15 * 60
+    ) throws -> Bool {
+        guard !ownerID.isEmpty, leaseDuration > 0 else { return false }
+        let changes = try executeReturningChanges(
+            """
+            INSERT INTO query_fetch_leases (query_profile_id, owner_id, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(query_profile_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                expires_at = excluded.expires_at
+            WHERE query_fetch_leases.expires_at <= ?
+               OR query_fetch_leases.owner_id = excluded.owner_id
+            """,
+            [
+                .string(profileID.uuidString),
+                .string(ownerID),
+                .double(now.addingTimeInterval(leaseDuration).timeIntervalSince1970),
+                .double(now.timeIntervalSince1970)
+            ]
+        )
+        return changes > 0
+    }
+
+    public func releaseQueryFetch(profileID: UUID, ownerID: String) throws {
+        try execute(
+            "DELETE FROM query_fetch_leases WHERE query_profile_id = ? AND owner_id = ?",
+            [.string(profileID.uuidString), .string(ownerID)]
+        )
     }
 
     public func deleteQueryProfile(id: UUID) throws {
@@ -140,6 +225,25 @@ public final class SQLiteResearchStore {
         return rows.first
     }
 
+    /// Fetches the newest analysis for every paper in one SQL statement.
+    /// The per-paper API remains available for point reads.
+    public func fetchLatestAnalyses() throws -> [String: LLMAnalysis] {
+        let rows: [LLMAnalysis] = try fetchJSON(
+            """
+            SELECT json FROM (
+                SELECT json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY paper_id
+                           ORDER BY created_at DESC, id DESC
+                       ) AS recency_rank
+                FROM analyses
+            )
+            WHERE recency_rank = 1
+            """
+        )
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.paperID, $0) })
+    }
+
     public func saveDeepRead(_ report: DeepReadReport) throws {
         let data = try encoder.encode(report)
         try execute(
@@ -158,16 +262,47 @@ public final class SQLiteResearchStore {
         return rows.first
     }
 
+    /// Fetches the newest deep-read report for every paper in one SQL statement.
+    /// The per-paper API remains available for point reads.
+    public func fetchLatestDeepReads() throws -> [String: DeepReadReport] {
+        let rows: [DeepReadReport] = try fetchJSON(
+            """
+            SELECT json FROM (
+                SELECT json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY paper_id
+                           ORDER BY created_at DESC, id DESC
+                       ) AS recency_rank
+                FROM deep_reads
+            )
+            WHERE recency_rank = 1
+            """
+        )
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.paperID, $0) })
+    }
+
     public func enqueue(_ job: SyncJob) throws {
+        var job = job
+        job.idempotencyKey = effectiveIdempotencyKey(for: job)
         let data = try encoder.encode(job)
         try execute(
-            "INSERT OR REPLACE INTO jobs (id, kind, state, json, scheduled_at) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO jobs (id, kind, state, json, scheduled_at, idempotency_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                kind = excluded.kind,
+                state = excluded.state,
+                json = excluded.json,
+                scheduled_at = excluded.scheduled_at,
+                idempotency_key = excluded.idempotency_key
+            """,
             [
                 .string(job.id.uuidString),
                 .string(job.kind.rawValue),
                 .string(job.state.rawValue),
                 .string(String(decoding: data, as: UTF8.self)),
-                .double(job.scheduledAt.timeIntervalSince1970)
+                .double(job.scheduledAt.timeIntervalSince1970),
+                job.idempotencyKey.map(SQLiteValue.string) ?? .null
             ]
         )
     }
@@ -179,18 +314,19 @@ public final class SQLiteResearchStore {
             return job
         }
 
-        let existing = try fetchJobs(kind: job.kind, limit: 10_000).first { candidate in
-            guard candidate.state == .pending || candidate.state == .running else {
-                return false
-            }
-            return effectiveIdempotencyKey(for: candidate) == key
-        }
-        if let existing {
-            return existing
-        }
-
         var job = job
         job.idempotencyKey = key
+        for _ in 0..<3 {
+            if try insertJobIgnoringActiveIdempotencyConflict(job) {
+                return job
+            }
+            if let existing = try fetchActiveJob(idempotencyKey: key) {
+                return existing
+            }
+            if let existing = try fetchJob(id: job.id) {
+                return existing
+            }
+        }
         try enqueue(job)
         return job
     }
@@ -233,6 +369,40 @@ public final class SQLiteResearchStore {
         )
     }
 
+    public func fetchPendingJobs(
+        kind: SyncJob.Kind? = nil,
+        scheduledThrough now: Date = Date(),
+        limit: Int = 100
+    ) throws -> [SyncJob] {
+        if let kind {
+            return try fetchJSON(
+                """
+                SELECT json FROM jobs
+                WHERE kind = ? AND state = ? AND scheduled_at <= ?
+                ORDER BY scheduled_at ASC LIMIT ?
+                """,
+                [
+                    .string(kind.rawValue),
+                    .string(SyncJob.State.pending.rawValue),
+                    .double(now.timeIntervalSince1970),
+                    .int(limit)
+                ]
+            )
+        }
+        return try fetchJSON(
+            """
+            SELECT json FROM jobs
+            WHERE state = ? AND scheduled_at <= ?
+            ORDER BY scheduled_at ASC LIMIT ?
+            """,
+            [
+                .string(SyncJob.State.pending.rawValue),
+                .double(now.timeIntervalSince1970),
+                .int(limit)
+            ]
+        )
+    }
+
     public func countJobs(kind: SyncJob.Kind? = nil, state: SyncJob.State? = nil) throws -> Int {
         if let kind, let state {
             return try fetchInt(
@@ -268,7 +438,12 @@ public final class SQLiteResearchStore {
         deviceID: String?,
         now: Date = Date()
     ) throws -> SyncJob? {
-        guard var job = try fetchJob(id: id), allowedStates.contains(job.state) else {
+        let claimableStates = allowedStates.subtracting([.running])
+        guard !claimableStates.isEmpty,
+              var job = try fetchJob(id: id),
+              claimableStates.contains(job.state),
+              job.state != .pending || job.scheduledAt <= now
+        else {
             return nil
         }
         job.state = .running
@@ -277,11 +452,22 @@ public final class SQLiteResearchStore {
         job.claimedAt = Self.persistableDate(now)
         job.completedAt = nil
         let data = try encoder.encode(job)
-        let allowed = allowedStates.map(\.rawValue)
+        let allowed = claimableStates.map(\.rawValue)
         let placeholders = Array(repeating: "?", count: allowed.count).joined(separator: ",")
         let changes = try executeReturningChanges(
-            "UPDATE jobs SET state = ?, json = ? WHERE id = ? AND state IN (\(placeholders))",
-            [.string(SyncJob.State.running.rawValue), .string(String(decoding: data, as: UTF8.self)), .string(id.uuidString)] + allowed.map { .string($0) }
+            """
+            UPDATE jobs SET state = ?, json = ?
+            WHERE id = ? AND state IN (\(placeholders))
+              AND (state != ? OR scheduled_at <= ?)
+            """,
+            [
+                .string(SyncJob.State.running.rawValue),
+                .string(String(decoding: data, as: UTF8.self)),
+                .string(id.uuidString)
+            ] + allowed.map { .string($0) } + [
+                .string(SyncJob.State.pending.rawValue),
+                .double(now.timeIntervalSince1970)
+            ]
         )
         return changes > 0 ? job : nil
     }
@@ -379,6 +565,7 @@ public final class SQLiteResearchStore {
     }
 
     private func fetchJSON<T: Decodable>(_ sql: String, _ values: [SQLiteValue] = []) throws -> [T] {
+        onStatementPrepared?(sql)
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw SQLiteStoreError.prepareFailed(lastError)
@@ -397,6 +584,7 @@ public final class SQLiteResearchStore {
     }
 
     private func fetchInt(_ sql: String, _ values: [SQLiteValue] = []) throws -> Int {
+        onStatementPrepared?(sql)
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw SQLiteStoreError.prepareFailed(lastError)
@@ -410,6 +598,7 @@ public final class SQLiteResearchStore {
     }
 
     private func executePragma(_ sql: String) throws {
+        onStatementPrepared?(sql)
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw SQLiteStoreError.prepareFailed(lastError)
@@ -426,6 +615,7 @@ public final class SQLiteResearchStore {
     }
 
     private func executeReturningChanges(_ sql: String, _ values: [SQLiteValue] = []) throws -> Int {
+        onStatementPrepared?(sql)
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw SQLiteStoreError.prepareFailed(lastError)
@@ -460,6 +650,100 @@ public final class SQLiteResearchStore {
             return true
         }
         return now.timeIntervalSince(claimedAt) >= staleAfter
+    }
+
+    private func table(_ tableName: String, hasColumn columnName: String) throws -> Bool {
+        onStatementPrepared?("PRAGMA table_info(\(tableName))")
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(tableName))", -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteStoreError.prepareFailed(lastError)
+        }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let cString = sqlite3_column_text(statement, 1) else { continue }
+            if String(cString: cString) == columnName {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func backfillJobIdempotencyKeys() throws {
+        for var job in try fetchJobs(limit: Int.max) {
+            guard let key = effectiveIdempotencyKey(for: job) else { continue }
+            job.idempotencyKey = key
+            let data = try encoder.encode(job)
+            try execute(
+                "UPDATE jobs SET json = ?, idempotency_key = ? WHERE id = ?",
+                [
+                    .string(String(decoding: data, as: UTF8.self)),
+                    .string(key),
+                    .string(job.id.uuidString)
+                ]
+            )
+        }
+    }
+
+    private func resolveDuplicateActiveJobs() throws {
+        let activeJobs = try fetchJobs(limit: Int.max).filter { job in
+            job.state == .pending || job.state == .running
+        }
+        let jobsByKey = Dictionary(grouping: activeJobs) { job in
+            effectiveIdempotencyKey(for: job)
+        }
+        for (key, jobs) in jobsByKey {
+            guard key != nil, jobs.count > 1 else { continue }
+            let ordered = jobs.sorted { lhs, rhs in
+                if lhs.state != rhs.state {
+                    return lhs.state == .running
+                }
+                if lhs.scheduledAt != rhs.scheduledAt {
+                    return lhs.scheduledAt < rhs.scheduledAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            for var duplicate in ordered.dropFirst() {
+                duplicate.state = .failed
+                duplicate.completedAt = Self.persistableDate(Date())
+                duplicate.lastError = "Deactivated duplicate active job during idempotency migration."
+                try enqueue(duplicate)
+            }
+        }
+    }
+
+    private func insertJobIgnoringActiveIdempotencyConflict(_ job: SyncJob) throws -> Bool {
+        let data = try encoder.encode(job)
+        let changes = try executeReturningChanges(
+            """
+            INSERT OR IGNORE INTO jobs (id, kind, state, json, scheduled_at, idempotency_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .string(job.id.uuidString),
+                .string(job.kind.rawValue),
+                .string(job.state.rawValue),
+                .string(String(decoding: data, as: UTF8.self)),
+                .double(job.scheduledAt.timeIntervalSince1970),
+                job.idempotencyKey.map(SQLiteValue.string) ?? .null
+            ]
+        )
+        return changes > 0
+    }
+
+    private func fetchActiveJob(idempotencyKey: String) throws -> SyncJob? {
+        let rows: [SyncJob] = try fetchJSON(
+            """
+            SELECT json FROM jobs
+            WHERE idempotency_key = ? AND state IN (?, ?)
+            LIMIT 1
+            """,
+            [
+                .string(idempotencyKey),
+                .string(SyncJob.State.pending.rawValue),
+                .string(SyncJob.State.running.rawValue)
+            ]
+        )
+        return rows.first
     }
 
     private func bind(_ values: [SQLiteValue], to statement: OpaquePointer?) throws {

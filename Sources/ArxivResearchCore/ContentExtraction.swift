@@ -372,6 +372,24 @@ public struct MarkdownHTMLRenderer {
         let body = parser.parse(markdown)
             .map(renderBlock)
             .joined(separator: "\n\n")
+        let mathJaxBootstrap: String
+        if markdown.contains("\\(") || markdown.contains("\\[") || markdown.contains("$$") || markdown.contains("$") {
+            mathJaxBootstrap = """
+              <script>
+              window.MathJax = {
+                tex: {
+                  inlineMath: [['\\\\(','\\\\)'], ['$', '$']],
+                  displayMath: [['\\\\[','\\\\]'], ['$$','$$']],
+                  processEscapes: true
+                },
+                startup: { typeset: true }
+              };
+              </script>
+              <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+            """
+        } else {
+            mathJaxBootstrap = ""
+        }
 
         return """
         <!doctype html>
@@ -379,17 +397,7 @@ public struct MarkdownHTMLRenderer {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <script>
-          window.MathJax = {
-            tex: {
-              inlineMath: [['\\\\(','\\\\)'], ['$', '$']],
-              displayMath: [['\\\\[','\\\\]'], ['$$','$$']],
-              processEscapes: true
-            },
-            startup: { typeset: true }
-          };
-          </script>
-          <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+        \(mathJaxBootstrap)
           <style>
           :root { color-scheme: light dark; }
           body { margin: 0; background: transparent; }

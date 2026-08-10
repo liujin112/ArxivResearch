@@ -38,33 +38,34 @@ The current bundle identifier is `com.arxivresearch.app`.
 
 ## Build
 
-Create the release app bundle:
+Create the ad-hoc signed release app bundle:
 
 ```sh
 ./scripts/build-app-bundle.sh
 ```
 
-The script prints the generated bundle path, normally:
+The script signs the nested helper first, signs the app, verifies the full bundle, and prints the generated path, normally:
 
 ```text
 .build/release/ArxivResearch.app
 ```
 
-## Sign
+## Developer ID Sign
 
-Set your Developer ID Application identity:
+The default build uses an ad-hoc signature for local and GitHub testing. For a notarizable public build, set your Developer ID Application identity when building:
 
 ```sh
-export IDENTITY='Developer ID Application: Your Name (TEAMID)'
+export SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'
+./scripts/build-app-bundle.sh
 ```
 
-Sign nested helper first, then the app:
+The build script signs the nested helper first, then the app. To re-sign an existing bundle manually:
 
 ```sh
-codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
   .build/release/ArxivResearch.app/Contents/Helpers/ArxivResearchHelper
 
-codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
   .build/release/ArxivResearch.app
 
 codesign --verify --deep --strict --verbose=2 \

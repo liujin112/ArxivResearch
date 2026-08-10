@@ -1,6 +1,6 @@
 import Foundation
 
-public protocol ArxivClient {
+public protocol ArxivClient: Sendable {
     func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed
 }
 

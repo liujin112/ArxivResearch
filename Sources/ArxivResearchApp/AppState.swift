@@ -16,23 +16,60 @@ struct LibraryDateBucket: Identifiable, Hashable {
     var count: Int
 }
 
+struct ActiveOperationState: Equatable {
+    enum Kind: Equatable {
+        case fetching
+        case runningJobs
+        case other
+    }
+
+    var kind: Kind
+    var title: String
+    var detail: String
+    var completedUnitCount: Int
+    var totalUnitCount: Int
+    var startedAt: Date
+
+    var progress: Double? {
+        guard totalUnitCount > 0 else { return nil }
+        return min(max(Double(completedUnitCount) / Double(totalUnitCount), 0), 1)
+    }
+}
+
+private struct AutomationStatusSnapshot: Sendable {
+    var status: LaunchAgentStatus?
+    var errorDescription: String?
+}
+
+private struct AutomationInstallSnapshot: Sendable {
+    var status: LaunchAgentStatus?
+    var errorDescription: String?
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var queryProfiles: [QueryProfile] = []
     @Published var papers: [Paper] = []
+    @Published private(set) var briefingPapers: [Paper] = []
+    @Published private(set) var recentPapers: [Paper] = []
+    @Published private(set) var savedPaperCount = 0
     @Published var sidebarSelection: LibrarySidebarSelection = .all
-    @Published var libraryDateField: PaperDateField = .added
+    @Published var libraryDateField: PaperDateField = .updated
     @Published var selectedQueryID: QueryProfile.ID?
     @Published var selectedPaperID: Paper.ID?
     @Published var selectedPaperIDs: Set<Paper.ID> = []
-    @Published var selectedPaperAnalysis: LLMAnalysis?
     @Published var latestAnalysesByPaperID: [String: LLMAnalysis] = [:]
-    @Published var deepReadMarkdown = ""
+    @Published private(set) var latestDeepReadsByPaperID: [String: DeepReadReport] = [:]
     @Published var statusMessage = "Ready"
     @Published var pendingJobCount = 0
     @Published var recentJobs: [SyncJob] = []
     @Published var isWorking = false
     @Published var queryPreviewURL = ""
+    @Published var activeOperation: ActiveOperationState?
+    @Published var automationLastError: String?
+    @Published var launchAgentStatus: LaunchAgentStatus?
+    @Published var launchAgentStatusError: String?
+    @Published var isActivityRailVisible = true
 
     @Published var providerKind: ProviderKind = .openAI
     @Published var providerModel = "gpt-4.1"
@@ -66,13 +103,63 @@ final class AppState: ObservableObject {
 
     private var store: SQLiteResearchStore?
     private let keychain = KeychainStore()
-    private let renderer = MarkdownHTMLRenderer()
     private let defaults = UserDefaults.standard
     private let runtimeSettingsStore = try? RuntimeSettingsStore.default()
     private var isAutoRunScheduled = false
+    private var busyOperationIDs = Set<UUID>()
+    private var inFlightFetchQueryIDs = Set<QueryProfile.ID>()
+    private var isRunningJobs = false
+    private var needsQueuedJobDrain = false
+    private var dailyFetchTask: Task<Void, Never>?
+    private var databaseChangeObserver: NSObjectProtocol?
+    private var automationStatusTask: Task<Void, Never>?
+    private var helperInstallTask: Task<Void, Never>?
 
     var selectedPaper: Paper? {
         papers.first { $0.id == selectedPaperID }
+    }
+
+    var selectedPaperAnalysis: LLMAnalysis? {
+        guard let selectedPaperID else { return nil }
+        return latestAnalysesByPaperID[selectedPaperID]
+    }
+
+    var deepReadMarkdown: String {
+        guard let selectedPaperID else { return "" }
+        return latestDeepReadsByPaperID[selectedPaperID]?.markdown ?? ""
+    }
+
+    var lastSuccessfulFetchAt: Date? {
+        queryProfiles.compactMap(\.lastFetchedAt).max()
+    }
+
+    var nextScheduledFetchAt: Date? {
+        queryProfiles
+            .filter(\.isEnabled)
+            .compactMap { profile in
+                guard let lastFetchedAt = profile.lastFetchedAt else { return Date() }
+                return Calendar.current.date(byAdding: .hour, value: profile.refreshIntervalHours, to: lastFetchedAt)
+            }
+            .min()
+    }
+
+    var enabledSubscriptionCount: Int {
+        queryProfiles.filter(\.isEnabled).count
+    }
+
+    var failedJobs: [SyncJob] {
+        recentJobs.filter { $0.state == .failed }
+    }
+
+    var isFetching: Bool {
+        activeOperation?.kind == .fetching
+    }
+
+    private var automationHelperURL: URL {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Helpers", isDirectory: true)
+            .appendingPathComponent("ArxivResearchHelper")
     }
 
     var selectedQueryFilterID: UUID? {
@@ -122,14 +209,6 @@ final class AppState: ObservableObject {
         )
     }
 
-    var renderedPaperDetailHTML: String {
-        renderer.render(selectedPaperDetailMarkdown)
-    }
-
-    var renderedDeepReadHTML: String {
-        renderedPaperDetailHTML
-    }
-
     var jobStatusText: String {
         let pending = recentJobs.filter { $0.state == .pending }.count
         let running = recentJobs.filter { $0.state == .running }.count
@@ -152,26 +231,6 @@ final class AppState: ObservableObject {
         recentJobs.filter { $0.kind == .syncZotero }.count
     }
 
-    private var selectedPaperDetailMarkdown: String {
-        var markdown = selectedPaperMarkdown
-        let deepRead = deepReadMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !deepRead.isEmpty {
-            markdown += "\n\n---\n\n## Deep Read\n\n\(deepRead)\n"
-        }
-        return markdown
-    }
-
-    private var selectedPaperMarkdown: String {
-        guard let paper = selectedPaper else {
-            return "# No Paper Selected\n\nChoose a paper from the list."
-        }
-        var markdown = "# \(paper.title)\n\n"
-        markdown += "**Authors:** \(paper.authors.joined(separator: ", "))\n\n"
-        markdown += "**arXiv:** \(paper.arxivID)\n\n"
-        markdown += "## Abstract\n\n\(paper.abstract)\n\n"
-        return markdown
-    }
-
     init() {
         loadSettings()
         do {
@@ -182,10 +241,25 @@ final class AppState: ObservableObject {
             statusMessage = "Local store unavailable: \(error.localizedDescription)"
             seedPreviewData()
         }
+        refreshAutomationStatus()
+#if os(macOS)
+        databaseChangeObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .arxivResearchDatabaseDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshExternalChanges(reportStatus: false)
+            }
+        }
+#endif
     }
 
     func load() throws {
         guard let store else { return }
+        let previousPaperID = selectedPaperID
+        let previousPaperIDs = selectedPaperIDs
+        let previousSidebarSelection = sidebarSelection
         queryProfiles = try store.fetchQueryProfiles()
         papers = try store.fetchPapers()
         if queryProfiles.isEmpty {
@@ -200,14 +274,21 @@ final class AppState: ObservableObject {
             seedPreviewData()
         }
         try refreshLatestAnalyses()
-        selectedQueryID = queryProfiles.first?.id
-        sidebarSelection = .all
-        selectedPaperID = papers.first?.id
-        selectedPaperIDs = Set(selectedPaperID.map { [$0] } ?? [])
+        if selectedQueryID == nil || !queryProfiles.contains(where: { $0.id == selectedQueryID }) {
+            selectedQueryID = queryProfiles.first?.id
+        }
+        sidebarSelection = validatedSidebarSelection(previousSidebarSelection)
+        if let previousPaperID, papers.contains(where: { $0.id == previousPaperID }) {
+            selectedPaperID = previousPaperID
+        } else {
+            selectedPaperID = papers.first?.id
+        }
+        selectedPaperIDs = previousPaperIDs.intersection(Set(papers.map(\.id)))
+        if selectedPaperIDs.isEmpty, let selectedPaperID {
+            selectedPaperIDs = [selectedPaperID]
+        }
         try refreshJobCount()
         updateQueryPreview()
-        try loadSelectedAnalysis()
-        startActiveAnalysisIfNeeded()
     }
 
     func reload() {
@@ -216,6 +297,18 @@ final class AppState: ObservableObject {
             statusMessage = "Reloaded local data"
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    func refreshExternalChanges(reportStatus: Bool = true) {
+        do {
+            try load()
+            refreshAutomationStatus()
+            if reportStatus {
+                statusMessage = "Up to date"
+            }
+        } catch {
+            statusMessage = "Could not refresh background changes: \(error.localizedDescription)"
         }
     }
 
@@ -353,7 +446,6 @@ final class AppState: ObservableObject {
             if let selectedPaperID, !papers.contains(where: { $0.id == selectedPaperID }) {
                 self.selectedPaperID = papers.first?.id
                 selectedPaperIDs = Set(self.selectedPaperID.map { [$0] } ?? [])
-                try loadSelectedAnalysis()
             }
             if case let .query(queryID) = sidebarSelection, queryID == id {
                 sidebarSelection = .all
@@ -380,14 +472,10 @@ final class AppState: ObservableObject {
 
     func focusPaper(id: Paper.ID, replaceSelection: Bool = false) {
         guard papers.contains(where: { $0.id == id }) else { return }
+        guard selectedPaperID != id || (replaceSelection && selectedPaperIDs != [id]) else { return }
         selectedPaperID = id
         if replaceSelection {
             selectedPaperIDs = [id]
-        }
-        do {
-            try loadSelectedAnalysis()
-        } catch {
-            statusMessage = error.localizedDescription
         }
     }
 
@@ -413,10 +501,14 @@ final class AppState: ObservableObject {
     }
 
     func queueSummaries(paperIDs: [Paper.ID]) {
+        Task { await queueSummariesNow(paperIDs: paperIDs) }
+    }
+
+    private func queueSummariesNow(paperIDs: [Paper.ID]) async {
         let targetIDs = Set(paperIDs)
         guard !targetIDs.isEmpty else { return }
         do {
-            guard try makeAutomationConfiguration().canProcess(.summarizeAbstract) else {
+            guard try await makeAutomationConfiguration().canProcess(.summarizeAbstract) else {
                 statusMessage = missingConfigurationMessage(for: .summarizeAbstract)
                 return
             }
@@ -446,7 +538,7 @@ final class AppState: ObservableObject {
     func analyzeUnanalyzedPapersNow(paperIDs: Set<Paper.ID>? = nil) async {
         guard let store else { return }
         await runBusy("Queuing abstract analysis") {
-            let configuration = try makeAutomationConfiguration()
+            let configuration = try await makeAutomationConfiguration()
             guard configuration.canProcess(.summarizeAbstract) else {
                 statusMessage = missingConfigurationMessage(for: .summarizeAbstract)
                 return
@@ -474,7 +566,6 @@ final class AppState: ObservableObject {
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             try refreshJobCount()
-            try loadSelectedAnalysis()
             statusMessage = "Abstract analysis: \(result.succeeded) succeeded, \(result.failed) failed, \(result.skipped) skipped"
         }
     }
@@ -485,9 +576,13 @@ final class AppState: ObservableObject {
     }
 
     func queueDeepRead(paperID: Paper.ID) {
+        Task { await queueDeepReadNow(paperID: paperID) }
+    }
+
+    private func queueDeepReadNow(paperID: Paper.ID) async {
         guard var paper = papers.first(where: { $0.id == paperID }) else { return }
         do {
-            guard try makeAutomationConfiguration().canProcess(.deepRead) else {
+            guard try await makeAutomationConfiguration().canProcess(.deepRead) else {
                 statusMessage = missingConfigurationMessage(for: .deepRead)
                 return
             }
@@ -511,8 +606,12 @@ final class AppState: ObservableObject {
     }
 
     func syncNotion(paperID: Paper.ID) {
+        Task { await syncNotionNow(paperID: paperID) }
+    }
+
+    private func syncNotionNow(paperID: Paper.ID) async {
         do {
-            guard try makeAutomationConfiguration().canProcess(.syncNotion) else {
+            guard try await makeAutomationConfiguration().canProcess(.syncNotion) else {
                 statusMessage = missingConfigurationMessage(for: .syncNotion)
                 return
             }
@@ -531,8 +630,12 @@ final class AppState: ObservableObject {
     }
 
     func syncZotero(paperID: Paper.ID) {
+        Task { await syncZoteroNow(paperID: paperID) }
+    }
+
+    private func syncZoteroNow(paperID: Paper.ID) async {
         do {
-            guard try makeAutomationConfiguration().canProcess(.syncZotero) else {
+            guard try await makeAutomationConfiguration().canProcess(.syncZotero) else {
                 statusMessage = missingConfigurationMessage(for: .syncZotero)
                 return
             }
@@ -550,11 +653,12 @@ final class AppState: ObservableObject {
             try store?.deletePaper(arxivID: paperID)
             papers.removeAll { $0.id == paperID }
             latestAnalysesByPaperID.removeValue(forKey: paperID)
+            latestDeepReadsByPaperID.removeValue(forKey: paperID)
+            rebuildBriefingPapers()
             selectedPaperIDs.remove(paperID)
             if selectedPaperID == paperID {
                 selectedPaperID = papers.first?.id
                 selectedPaperIDs = Set(selectedPaperID.map { [$0] } ?? [])
-                try loadSelectedAnalysis()
             }
             try refreshJobCount()
             statusMessage = "Deleted \(paperID)"
@@ -573,7 +677,7 @@ final class AppState: ObservableObject {
             guard !rawInput.isEmpty else {
                 throw AppActionError.missingAcademicProfileInput
             }
-            let configuration = try makeAutomationConfiguration()
+            let configuration = try await makeAutomationConfiguration()
             guard let provider = configuration.llmProvider,
                   let apiKey = configuration.llmAPIKey,
                   !apiKey.isEmpty
@@ -616,15 +720,36 @@ final class AppState: ObservableObject {
         await fetchQuery(id: id)
     }
 
-    func fetchQuery(id: QueryProfile.ID) async {
-        guard var profile = queryProfiles.first(where: { $0.id == id }), let store else { return }
+    @discardableResult
+    func fetchQuery(id: QueryProfile.ID) async -> Bool {
+        guard !inFlightFetchQueryIDs.contains(id) else {
+            statusMessage = "That subscription is already fetching."
+            return false
+        }
+        guard let profile = queryProfiles.first(where: { $0.id == id }), let store else { return false }
+        inFlightFetchQueryIDs.insert(id)
+        defer { inFlightFetchQueryIDs.remove(id) }
+        let leaseOwnerID = "app-\(UUID().uuidString)"
+        do {
+            guard try store.claimQueryFetch(profileID: id, ownerID: leaseOwnerID) else {
+                statusMessage = "This subscription is already being fetched in the background."
+                return false
+            }
+        } catch {
+            statusMessage = "Could not coordinate this fetch: \(error.localizedDescription)"
+            return false
+        }
+        defer { try? store.releaseQueryFetch(profileID: id, ownerID: leaseOwnerID) }
         selectedQueryID = id
+        var didSucceed = false
         await runBusy("Fetching arXiv") {
+            try Task.checkCancellation()
             let settings = currentRuntimeSettings()
             let shouldQueueSummaries = settings.activeAnalyzeUnanalyzedPapers && settings.canQueueSummariesWithoutSecrets
             let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
             queryPreviewURL = try request.url().absoluteString
             let feed = try await ArxivHTTPClient().search(request)
+            try Task.checkCancellation()
             let fetchedAt = Date()
             var queuedSummaryJobIDs: [SyncJob.ID] = []
             var seenSummaryJobIDs = Set<SyncJob.ID>()
@@ -653,7 +778,7 @@ final class AppState: ObservableObject {
             var summaryRunMessage = ""
             if !queuedSummaryJobIDs.isEmpty {
                 do {
-                    let configuration = try makeAutomationConfiguration()
+                    let configuration = try await makeAutomationConfiguration()
                     if configuration.canProcess(.summarizeAbstract) {
                         let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
                             try self?.refreshJobCount()
@@ -673,19 +798,93 @@ final class AppState: ObservableObject {
                     summaryRunMessage = "; summaries queued but auto-run failed: \(error.localizedDescription)"
                 }
             }
-            profile.lastFetchedAt = Date()
-            try store.upsertQueryProfile(profile)
+            if var latestProfile = try store.fetchQueryProfile(id: profile.id) {
+                latestProfile.lastFetchedAt = Date()
+                try store.upsertQueryProfile(latestProfile)
+            }
             queryProfiles = try store.fetchQueryProfiles()
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             selectedPaperID = papers.first?.id
             try refreshJobCount()
-            try loadSelectedAnalysis()
             if shouldQueueSummaries {
                 statusMessage = "Fetched \(feed.entries.count) papers, queued \(queuedSummaryJobIDs.count) summaries\(summaryRunMessage)"
             } else {
                 statusMessage = "Fetched \(feed.entries.count) papers; validate LLM before queuing summaries"
             }
+            didSucceed = true
+        }
+        return didSucceed
+    }
+
+    func startDailyFetch() {
+        guard dailyFetchTask == nil else {
+            statusMessage = "Daily fetch is already running."
+            return
+        }
+        guard !isWorking else {
+            statusMessage = "Wait for the current operation to finish before fetching."
+            return
+        }
+        let profileIDs = queryProfiles.filter(\.isEnabled).map(\.id)
+        guard !profileIDs.isEmpty else {
+            statusMessage = "Enable at least one subscription before fetching."
+            return
+        }
+
+        automationLastError = nil
+        dailyFetchTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performDailyFetch(profileIDs: profileIDs)
+        }
+    }
+
+    func cancelActiveOperation() {
+        guard dailyFetchTask != nil else { return }
+        dailyFetchTask?.cancel()
+        statusMessage = "Cancelling fetch…"
+    }
+
+    private func performDailyFetch(profileIDs: [QueryProfile.ID]) async {
+        let startedAt = Date()
+        activeOperation = ActiveOperationState(
+            kind: .fetching,
+            title: "Fetching subscriptions",
+            detail: "Preparing arXiv requests",
+            completedUnitCount: 0,
+            totalUnitCount: profileIDs.count,
+            startedAt: startedAt
+        )
+        var failures: [String] = []
+
+        for (index, profileID) in profileIDs.enumerated() {
+            if Task.isCancelled { break }
+            let profileName = queryProfiles.first(where: { $0.id == profileID })?.name ?? "Subscription"
+            activeOperation = ActiveOperationState(
+                kind: .fetching,
+                title: "Fetching · \(profileName)",
+                detail: "\(index) of \(profileIDs.count) subscriptions complete",
+                completedUnitCount: index,
+                totalUnitCount: profileIDs.count,
+                startedAt: startedAt
+            )
+            let succeeded = await fetchQuery(id: profileID)
+            if !succeeded, !Task.isCancelled {
+                failures.append(profileName)
+            }
+        }
+
+        let wasCancelled = Task.isCancelled
+        dailyFetchTask = nil
+        activeOperation = nil
+        if wasCancelled {
+            statusMessage = "Daily fetch cancelled."
+        } else if failures.isEmpty {
+            automationLastError = nil
+            statusMessage = "Daily fetch complete."
+        } else {
+            automationLastError = "Failed: \(failures.joined(separator: ", "))"
+            statusMessage = automationLastError ?? "Daily fetch finished with errors."
         }
     }
 
@@ -695,8 +894,14 @@ final class AppState: ObservableObject {
 
     func runPendingJobs(kind: SyncJob.Kind?) async {
         guard let store else { return }
+        guard !isRunningJobs else {
+            statusMessage = "The job runner is already active."
+            return
+        }
+        isRunningJobs = true
+        defer { isRunningJobs = false }
         await runBusy("Running jobs") {
-            let configuration = try makeAutomationConfiguration()
+            let configuration = try await makeAutomationConfiguration()
             try refreshJobCount()
             let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
                 try self?.refreshJobCount()
@@ -709,7 +914,6 @@ final class AppState: ObservableObject {
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             try refreshJobCount()
-            try loadSelectedAnalysis()
             if result.succeeded > 0 || result.failed > 0 {
                 statusMessage = "Jobs: \(result.succeeded) succeeded, \(result.failed) failed, \(result.skipped) skipped"
             } else if result.skipped > 0 {
@@ -722,8 +926,12 @@ final class AppState: ObservableObject {
 
     func runJob(jobID: SyncJob.ID) async {
         guard let store else { return }
+        guard recentJobs.first(where: { $0.id == jobID })?.state != .running else {
+            statusMessage = "That job is already running."
+            return
+        }
         await runBusy("Running selected job") {
-            let configuration = try makeAutomationConfiguration()
+            let configuration = try await makeAutomationConfiguration()
             let processor = AutomationJobProcessor(store: store, configuration: configuration) { [weak self] in
                 try self?.refreshJobCount()
             }
@@ -732,7 +940,6 @@ final class AppState: ObservableObject {
             papers = try store.fetchPapers()
             try refreshLatestAnalyses()
             try refreshJobCount()
-            try loadSelectedAnalysis()
             if result.succeeded > 0 {
                 statusMessage = "Job completed"
             } else if result.failed > 0 {
@@ -755,11 +962,25 @@ final class AppState: ObservableObject {
 
     func clearJobs(kind: SyncJob.Kind? = nil) {
         do {
-            let deleted = try store?.deleteJobs(kind: kind, includingRunning: true) ?? 0
+            let deleted = try store?.deleteJobs(kind: kind, includingRunning: false) ?? 0
             try refreshJobCount()
             statusMessage = deleted == 1 ? "1 job cleared" : "\(deleted) jobs cleared"
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    func retryFailedJobs() {
+        let failedIDs = failedJobs.map(\.id)
+        guard !failedIDs.isEmpty else {
+            statusMessage = "No failed jobs to retry."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            for jobID in failedIDs {
+                await self.runJob(jobID: jobID)
+            }
         }
     }
 
@@ -769,7 +990,7 @@ final class AppState: ObservableObject {
             guard !notionParentPageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AppActionError.missingNotionParentPage
             }
-            guard let notionToken = try keychain.get("notion"), !notionToken.isEmpty else {
+            guard let notionToken = try await keychainValue(for: "notion"), !notionToken.isEmpty else {
                 throw AppActionError.missingNotionToken
             }
             let client = NotionAPIClient(config: NotionConfig(
@@ -799,18 +1020,76 @@ final class AppState: ObservableObject {
     }
 
     func installLaunchAgent() {
-        do {
-            let helperURL = Bundle.main.bundleURL
-                .appendingPathComponent("Contents", isDirectory: true)
-                .appendingPathComponent("Helpers", isDirectory: true)
-                .appendingPathComponent("ArxivResearchHelper")
-            guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
-                throw AppActionError.helperNotFound(helperURL.path)
-            }
-            let destination = try LaunchAgentInstaller(helperExecutableURL: helperURL).install()
-            statusMessage = "LaunchAgent installed: \(destination.lastPathComponent)"
-        } catch {
+        guard helperInstallTask == nil else {
+            statusMessage = "Automation helper installation is already running."
+            return
+        }
+        let helperURL = automationHelperURL
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            let error = AppActionError.helperNotFound(helperURL.path)
+            launchAgentStatusError = error.localizedDescription
+            automationLastError = error.localizedDescription
             statusMessage = error.localizedDescription
+            return
+        }
+        let operationID = UUID()
+        busyOperationIDs.insert(operationID)
+        isWorking = true
+        statusMessage = "Installing automation helper…"
+        helperInstallTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                do {
+                    let result = try LaunchAgentInstaller(helperExecutableURL: helperURL).installAndLoad()
+                    return AutomationInstallSnapshot(
+                        status: result.status,
+                        errorDescription: nil
+                    )
+                } catch {
+                    return AutomationInstallSnapshot(
+                        status: nil,
+                        errorDescription: error.localizedDescription
+                    )
+                }
+            }.value
+            guard let self else { return }
+            self.busyOperationIDs.remove(operationID)
+            self.isWorking = !self.busyOperationIDs.isEmpty
+            self.helperInstallTask = nil
+            if let status = snapshot.status {
+                self.launchAgentStatus = status
+                self.launchAgentStatusError = nil
+                self.automationLastError = nil
+                self.statusMessage = status.isLoaded
+                    ? "Scheduled fetching is installed and on schedule."
+                    : "Automation helper installed, but launchd has not loaded it."
+            } else {
+                let message = snapshot.errorDescription ?? "Automation helper installation failed."
+                self.launchAgentStatusError = message
+                self.automationLastError = message
+                self.statusMessage = message
+                self.refreshAutomationStatus()
+            }
+        }
+    }
+
+    func refreshAutomationStatus() {
+        guard automationStatusTask == nil else { return }
+        let helperURL = automationHelperURL
+        automationStatusTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                do {
+                    return AutomationStatusSnapshot(
+                        status: try LaunchAgentInstaller(helperExecutableURL: helperURL).status(),
+                        errorDescription: nil
+                    )
+                } catch {
+                    return AutomationStatusSnapshot(status: nil, errorDescription: error.localizedDescription)
+                }
+            }.value
+            guard let self else { return }
+            self.launchAgentStatus = snapshot.status
+            self.launchAgentStatusError = snapshot.errorDescription
+            self.automationStatusTask = nil
         }
     }
 
@@ -831,7 +1110,7 @@ final class AppState: ObservableObject {
                 throw AppActionError.missingAzureDeploymentName
             }
             let apiKey = providerAPIKeyDraft.isEmpty
-                ? (try storedProviderAPIKey(for: effectiveKind) ?? "")
+                ? (try await storedProviderAPIKey(for: effectiveKind) ?? "")
                 : providerAPIKeyDraft
             guard !apiKey.isEmpty else {
                 throw AppActionError.missingProviderAPIKey
@@ -862,17 +1141,21 @@ final class AppState: ObservableObject {
                 baseURL: providerBaseURL,
                 apiVersion: providerAPIVersion
             )
-            try keychain.set(apiKey, for: effectiveKind.rawValue)
+            try await setKeychainValue(apiKey, for: effectiveKind.rawValue)
             saveSettings()
             statusMessage = "LLM validated and saved"
         }
     }
 
     func saveNotionToken() {
+        Task { await saveNotionTokenNow() }
+    }
+
+    private func saveNotionTokenNow() async {
         do {
             saveSettings()
             if !notionTokenDraft.isEmpty {
-                try keychain.set(notionTokenDraft, for: "notion")
+                try await setKeychainValue(notionTokenDraft, for: "notion")
             }
             notionTokenDraft = ""
             statusMessage = "Notion settings saved"
@@ -882,10 +1165,14 @@ final class AppState: ObservableObject {
     }
 
     func saveZoteroToken() {
+        Task { await saveZoteroTokenNow() }
+    }
+
+    private func saveZoteroTokenNow() async {
         do {
             saveSettings()
             if !zoteroTokenDraft.isEmpty {
-                try keychain.set(zoteroTokenDraft, for: "zotero")
+                try await setKeychainValue(zoteroTokenDraft, for: "zotero")
             }
             zoteroTokenDraft = ""
             statusMessage = "Zotero settings saved"
@@ -941,34 +1228,41 @@ final class AppState: ObservableObject {
             if let index = papers.firstIndex(where: { $0.id == paper.id }) {
                 papers[index] = paper
             }
+            if let index = briefingPapers.firstIndex(where: { $0.id == paper.id }) {
+                briefingPapers[index] = paper
+            }
+            savedPaperCount = papers.lazy.filter { $0.status == .interested }.count
         } catch {
             statusMessage = error.localizedDescription
         }
     }
 
-    private func loadSelectedAnalysis() throws {
-        guard let id = selectedPaperID else {
-            selectedPaperAnalysis = nil
-            deepReadMarkdown = ""
-            return
-        }
-        selectedPaperAnalysis = try store?.latestAnalysis(for: id)
-        deepReadMarkdown = try store?.latestDeepRead(for: id)?.markdown ?? ""
-    }
-
     private func refreshLatestAnalyses() throws {
         guard let store else {
             latestAnalysesByPaperID = [:]
+            latestDeepReadsByPaperID = [:]
             return
         }
-        latestAnalysesByPaperID = try Dictionary(
-            uniqueKeysWithValues: papers.compactMap { paper in
-                guard let analysis = try store.latestAnalysis(for: paper.arxivID) else {
-                    return nil
-                }
-                return (paper.arxivID, analysis)
+        latestAnalysesByPaperID = try store.fetchLatestAnalyses()
+        latestDeepReadsByPaperID = try store.fetchLatestDeepReads()
+        rebuildBriefingPapers()
+    }
+
+    private func rebuildBriefingPapers() {
+        savedPaperCount = papers.lazy.filter { $0.status == .interested }.count
+        recentPapers = papers.sorted {
+            ($0.addedAt ?? $0.updatedAt ?? $0.publishedAt ?? .distantPast)
+                > ($1.addedAt ?? $1.updatedAt ?? $1.publishedAt ?? .distantPast)
+        }
+        briefingPapers = papers.sorted { lhs, rhs in
+            let lhsScore = latestAnalysesByPaperID[lhs.arxivID]?.relevanceScore ?? -1
+            let rhsScore = latestAnalysesByPaperID[rhs.arxivID]?.relevanceScore ?? -1
+            if lhsScore != rhsScore {
+                return lhsScore > rhsScore
             }
-        )
+            return (lhs.addedAt ?? lhs.updatedAt ?? lhs.publishedAt ?? .distantPast)
+                > (rhs.addedAt ?? rhs.updatedAt ?? rhs.publishedAt ?? .distantPast)
+        }
     }
 
     private func refreshJobCount() throws {
@@ -978,9 +1272,14 @@ final class AppState: ObservableObject {
     }
 
     private func startQueuedJobsIfIdle() {
-        guard !isWorking, !isAutoRunScheduled else {
+        guard !isAutoRunScheduled else {
             return
         }
+        guard !isWorking else {
+            needsQueuedJobDrain = true
+            return
+        }
+        needsQueuedJobDrain = false
         isAutoRunScheduled = true
         Task { [weak self] in
             await self?.runAutoQueuedJobs()
@@ -1024,13 +1323,33 @@ final class AppState: ObservableObject {
     }
 
     private func runBusy(_ workingMessage: String, operation: () async throws -> Void) async {
-        isWorking = true
+        let operationID = UUID()
+        busyOperationIDs.insert(operationID)
+        isWorking = !busyOperationIDs.isEmpty
         statusMessage = workingMessage
-        defer { isWorking = false }
+        defer {
+            busyOperationIDs.remove(operationID)
+            isWorking = !busyOperationIDs.isEmpty
+            if !isWorking, needsQueuedJobDrain, !isAutoRunScheduled {
+                startQueuedJobsIfIdle()
+            }
+        }
         do {
             try await operation()
+        } catch is CancellationError {
+            statusMessage = "Operation cancelled."
         } catch {
             statusMessage = error.localizedDescription
+            automationLastError = error.localizedDescription
+        }
+    }
+
+    private func validatedSidebarSelection(_ selection: LibrarySidebarSelection) -> LibrarySidebarSelection {
+        switch selection {
+        case .all, .thisWeek, .date:
+            selection
+        case let .query(id):
+            queryProfiles.contains(where: { $0.id == id }) ? selection : .all
         }
     }
 
@@ -1129,21 +1448,24 @@ final class AppState: ObservableObject {
         deepReadPrompt = settings.deepReadPrompt
     }
 
-    private func makeAutomationConfiguration() throws -> AutomationConfiguration {
+    private func makeAutomationConfiguration() async throws -> AutomationConfiguration {
+        let settings = currentRuntimeSettings()
         var llmProvider: (any LLMProvider)?
         var llmAPIKey: String?
-        if let baseURL = URL(string: providerBaseURL),
-           let apiKey = try storedProviderAPIKey(for: LLMProviderFactory.resolvedKind(for: providerKind, baseURL: baseURL)),
+        if let baseURL = URL(string: settings.providerBaseURL),
+           let apiKey = try await storedProviderAPIKey(for: LLMProviderFactory.resolvedKind(for: settings.providerKind, baseURL: baseURL)),
            !apiKey.isEmpty {
-            let effectiveKind = LLMProviderFactory.resolvedKind(for: providerKind, baseURL: baseURL)
-            let deploymentName = effectiveKind == .azureOpenAI ? azureDeploymentName(for: baseURL) : nil
+            let effectiveKind = LLMProviderFactory.resolvedKind(for: settings.providerKind, baseURL: baseURL)
+            let deploymentName = effectiveKind == .azureOpenAI
+                ? extractedAzureDeploymentName(from: baseURL) ?? settings.providerDeploymentName.nilIfEmpty
+                : nil
             if effectiveKind != .azureOpenAI || deploymentName != nil {
                 let config = ProviderConfig(
                     kind: effectiveKind,
-                    model: providerModel,
+                    model: settings.providerModel,
                     baseURL: baseURL,
                     apiKeyRef: effectiveKind.rawValue,
-                    apiVersion: providerAPIVersion,
+                    apiVersion: settings.providerAPIVersion,
                     deploymentName: deploymentName
                 )
                 llmProvider = LLMProviderFactory.make(config: config)
@@ -1152,27 +1474,27 @@ final class AppState: ObservableObject {
         }
 
         var notionClient: (any NotionSyncClient)?
-        if let notionToken = try keychain.get("notion"),
+        if let notionToken = try await keychainValue(for: "notion"),
            !notionToken.isEmpty,
-           !notionDataSourceID.isEmpty {
+           !settings.notionDataSourceID.isEmpty {
             notionClient = NotionAPIClient(config: NotionConfig(
                 tokenRef: notionToken,
-                parentPageID: notionParentPageID,
-                databaseID: notionDatabaseID.isEmpty ? nil : notionDatabaseID,
-                dataSourceID: notionDataSourceID
+                parentPageID: settings.notionParentPageID,
+                databaseID: settings.notionDatabaseID.isEmpty ? nil : settings.notionDatabaseID,
+                dataSourceID: settings.notionDataSourceID
             ))
         }
 
         var zoteroClient: (any ZoteroSyncClient)?
-        if let zoteroToken = try keychain.get("zotero"),
+        if let zoteroToken = try await keychainValue(for: "zotero"),
            !zoteroToken.isEmpty,
-           let libraryID = Int(zoteroLibraryID),
-           !zoteroCollectionKey.isEmpty {
-            let library: ZoteroConfig.Library = zoteroLibraryKind == "group" ? .group(id: libraryID) : .user(id: libraryID)
+           let libraryID = Int(settings.zoteroLibraryID),
+           !settings.zoteroCollectionKey.isEmpty {
+            let library: ZoteroConfig.Library = settings.zoteroLibraryKind == "group" ? .group(id: libraryID) : .user(id: libraryID)
             zoteroClient = ZoteroAPIClient(config: ZoteroConfig(
                 tokenRef: zoteroToken,
                 library: library,
-                collectionKey: zoteroCollectionKey
+                collectionKey: settings.zoteroCollectionKey
             ))
         }
 
@@ -1180,33 +1502,47 @@ final class AppState: ObservableObject {
             llmProvider: llmProvider,
             llmAPIKey: llmAPIKey,
             summaryPromptOptions: SummaryPromptOptions(
-                academicProfile: generatedAcademicProfile,
-                language: summaryLanguage,
-                customInstructions: summaryPromptInstructions
+                academicProfile: settings.generatedAcademicProfile,
+                language: settings.summaryLanguage,
+                customInstructions: settings.summaryPromptInstructions
             ),
-            deepReadPrompt: deepReadPrompt,
-            llmMaxTokens: providerMaxTokens,
-            llmTemperature: providerTemperature,
-            llmTopP: parsedProviderTopP,
-            llmConcurrency: providerConcurrency,
-            llmRetryLimit: providerRetryLimit,
+            deepReadPrompt: settings.deepReadPrompt,
+            llmMaxTokens: settings.providerMaxTokens,
+            llmTemperature: settings.providerTemperature,
+            llmTopP: settings.providerTopP,
+            llmConcurrency: settings.providerConcurrency,
+            llmRetryLimit: settings.providerRetryLimit,
             notionClient: notionClient,
             zoteroClient: zoteroClient,
-            autoSyncNotion: notionAutoSync,
-            activeAnalyzeUnanalyzedPapers: activeAnalyzeUnanalyzedPapers
+            autoSyncNotion: settings.notionAutoSync,
+            activeAnalyzeUnanalyzedPapers: settings.activeAnalyzeUnanalyzedPapers
         )
     }
 
-    private func storedProviderAPIKey(for kind: ProviderKind) throws -> String? {
-        if let direct = try keychain.get(kind.rawValue), !direct.isEmpty {
+    private func storedProviderAPIKey(for kind: ProviderKind) async throws -> String? {
+        if let direct = try await keychainValue(for: kind.rawValue), !direct.isEmpty {
             return direct
         }
         if kind == .azureOpenAI,
-           let legacyOpenAIKey = try keychain.get(ProviderKind.openAI.rawValue),
+           let legacyOpenAIKey = try await keychainValue(for: ProviderKind.openAI.rawValue),
            !legacyOpenAIKey.isEmpty {
             return legacyOpenAIKey
         }
         return nil
+    }
+
+    private func keychainValue(for key: String) async throws -> String? {
+        let service = keychain.service
+        return try await Task.detached(priority: .userInitiated) {
+            try KeychainStore(service: service).get(key)
+        }.value
+    }
+
+    private func setKeychainValue(_ value: String, for key: String) async throws {
+        let service = keychain.service
+        try await Task.detached(priority: .userInitiated) {
+            try KeychainStore(service: service).set(value, for: key)
+        }.value
     }
 
     private func azureDeploymentName(for baseURL: URL) -> String? {
@@ -1270,6 +1606,7 @@ final class AppState: ObservableObject {
             Paper.fixture(arxivID: "2401.00001"),
             Paper.fixture(arxivID: "2401.00002")
         ]
+        rebuildBriefingPapers()
         selectedPaperID = papers.first?.id
     }
 

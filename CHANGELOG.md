@@ -6,6 +6,8 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-10
+
 ### Added
 
 - macOS paper research workspace with arXiv query subscriptions, paper list, detail reader, markdown rendering, tags, filters, and job controls.
@@ -28,11 +30,11 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 
 ### Fixed
 
-- Stale running jobs can be recovered and restarted.
+- Stale running jobs can be recovered safely without allowing active jobs to be claimed twice.
 - Queued follow-up jobs can auto-run after LLM analysis and deep-read updates.
 - Notion schema mismatch for missing paper properties is repaired before retrying sync.
 - Deleting a query preserves papers that are still associated with other query profiles.
-
-## [0.1.0] - TBD
-
-Initial public release placeholder.
+- Scheduled fetch registration now creates its log directory, reloads launchd, and reports verified helper health.
+- Manual fetches and queued automation operations avoid duplicate concurrent execution.
+- Briefing and Library navigation retain their view hierarchies, use full-row hit targets, and batch artifact reads to remove interaction stalls.
+- Library date browsing now exposes exact paper counts grouped by updated, added, or published day.

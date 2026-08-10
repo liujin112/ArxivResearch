@@ -18,7 +18,13 @@ The project is local-first: papers, analyses, jobs, and settings are stored loca
 
 ## Status
 
-This repository is early-stage software. The macOS app is usable for local testing, but distribution signing, notarization, and iCloud production sync still need project-owner configuration.
+ArxivResearch is early-stage software. The macOS workspace, scheduled helper, local job queue, and provider integrations are available for hands-on use; iCloud production sync remains under development.
+
+## Download
+
+Download the Apple Silicon macOS app from [GitHub Releases](https://github.com/liujin112/ArxivResearch/releases).
+
+The first public build is ad-hoc signed but not Apple-notarized. On first launch, Control-click the app, choose **Open**, then confirm **Open**. Users who require a notarized build can build from source or wait for a future Developer ID release.
 
 ## Requirements
 
@@ -54,7 +60,7 @@ Verify the local app bundle launches:
 ./script/build_and_run.sh --verify
 ```
 
-Build a release-mode app bundle under `.build/release/ArxivResearch.app`:
+Build an ad-hoc signed release-mode app bundle under `.build/release/ArxivResearch.app`:
 
 ```sh
 ./scripts/build-app-bundle.sh

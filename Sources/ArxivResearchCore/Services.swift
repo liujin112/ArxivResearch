@@ -1,6 +1,6 @@
 import Foundation
 
-public final class ArxivHTTPClient: ArxivClient {
+public final class ArxivHTTPClient: ArxivClient, @unchecked Sendable {
     private let session: URLSession
     private let parser: ArxivAtomParser
 
@@ -103,56 +103,135 @@ public final class URLContentExtractor: ContentExtractor, @unchecked Sendable {
     }
 }
 
+public struct ResearchAutomationProfileFailure: Hashable, Sendable {
+    public var profileID: QueryProfile.ID
+    public var profileName: String
+    public var message: String
+
+    public init(profileID: QueryProfile.ID, profileName: String, message: String) {
+        self.profileID = profileID
+        self.profileName = profileName
+        self.message = message
+    }
+}
+
+public struct ResearchAutomationRunReport: Hashable, Sendable {
+    public var attemptedProfileIDs: [QueryProfile.ID] = []
+    public var succeededProfileIDs: [QueryProfile.ID] = []
+    public var skippedProfileIDs: [QueryProfile.ID] = []
+    public var failures: [ResearchAutomationProfileFailure] = []
+
+    public init() {}
+}
+
+public enum ResearchAutomationError: Error, LocalizedError, Sendable {
+    case profileNotFound(QueryProfile.ID)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .profileNotFound(id):
+            "Subscription \(id.uuidString) no longer exists."
+        }
+    }
+}
+
+@MainActor
 public final class ResearchAutomationService {
     private let store: SQLiteResearchStore
     private let arxivClient: any ArxivClient
     private let queueSummaries: Bool
+    private let interProfileDelay: Duration
 
     public init(
         store: SQLiteResearchStore,
         arxivClient: any ArxivClient = ArxivHTTPClient(),
-        queueSummaries: Bool = true
+        queueSummaries: Bool = true,
+        interProfileDelay: Duration = .seconds(3)
     ) {
         self.store = store
         self.arxivClient = arxivClient
         self.queueSummaries = queueSummaries
+        self.interProfileDelay = interProfileDelay
     }
 
-    public func runOnce(now: Date = Date()) async throws {
+    @discardableResult
+    public func runOnce(now: Date = Date()) async throws -> ResearchAutomationRunReport {
         let profiles = try store.fetchQueryProfiles().filter { profile in
             guard profile.isEnabled else { return false }
             guard let lastFetchedAt = profile.lastFetchedAt else { return true }
             return now.timeIntervalSince(lastFetchedAt) >= Double(profile.refreshIntervalHours * 3600)
         }
 
-        for profile in profiles {
-            let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
-            let feed = try await arxivClient.search(request)
-            for entry in feed.entries {
-                var paper = entry.asPaper(queryProfileID: profile.id)
-                paper.addedAt = now
-                if let existing = try store.fetchPaper(arxivID: paper.arxivID) {
-                    paper.queryProfileIDs = Array(Set(existing.queryProfileIDs + [profile.id]))
-                    paper.status = existing.status
-                    paper.tags = existing.tags
-                    paper.zoteroKey = existing.zoteroKey
-                    paper.notionPageID = existing.notionPageID
-                    paper.addedAt = existing.addedAt ?? now
+        var report = ResearchAutomationRunReport()
+        for (index, profile) in profiles.enumerated() {
+            report.attemptedProfileIDs.append(profile.id)
+            do {
+                if try await runProfile(profileID: profile.id, now: now) {
+                    report.succeededProfileIDs.append(profile.id)
+                } else {
+                    report.skippedProfileIDs.append(profile.id)
                 }
-                try store.upsertPaper(paper)
-                if queueSummaries, try store.latestAnalysis(for: entry.arxivID) == nil {
-                    try store.enqueueIfNeeded(try SyncJob.paperJob(kind: .summarizeAbstract, paperID: entry.arxivID))
-                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                report.failures.append(ResearchAutomationProfileFailure(
+                    profileID: profile.id,
+                    profileName: profile.name,
+                    message: error.localizedDescription
+                ))
             }
-            var updatedProfile = profile
-            updatedProfile.lastFetchedAt = now
-            try store.upsertQueryProfile(updatedProfile)
-            try await Task.sleep(for: .seconds(3))
+            if index < profiles.index(before: profiles.endIndex) {
+                try await Task.sleep(for: interProfileDelay)
+            }
         }
 
         if queueSummaries {
             _ = try queueUnanalyzedSummaries()
         }
+        return report
+    }
+
+    /// Fetches one subscription under a cross-process lease. Returns `false`
+    /// when another app/helper process already owns the active lease.
+    @discardableResult
+    public func runProfile(
+        profileID: QueryProfile.ID,
+        now: Date = Date(),
+        leaseOwnerID: String = "automation-\(UUID().uuidString)"
+    ) async throws -> Bool {
+        guard let profile = try store.fetchQueryProfile(id: profileID) else {
+            throw ResearchAutomationError.profileNotFound(profileID)
+        }
+        guard try store.claimQueryFetch(profileID: profileID, ownerID: leaseOwnerID, now: now) else {
+            return false
+        }
+        defer { try? store.releaseQueryFetch(profileID: profileID, ownerID: leaseOwnerID) }
+
+        let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
+        let feed = try await arxivClient.search(request)
+        var fetchedPaperIDs = Set<Paper.ID>()
+        for entry in feed.entries {
+            var paper = entry.asPaper(queryProfileID: profile.id)
+            paper.addedAt = now
+            if let existing = try store.fetchPaper(arxivID: paper.arxivID) {
+                paper.queryProfileIDs = Array(Set(existing.queryProfileIDs + [profile.id]))
+                paper.status = existing.status
+                paper.tags = existing.tags
+                paper.zoteroKey = existing.zoteroKey
+                paper.notionPageID = existing.notionPageID
+                paper.addedAt = existing.addedAt ?? now
+            }
+            try store.upsertPaper(paper)
+            fetchedPaperIDs.insert(paper.arxivID)
+        }
+        if queueSummaries {
+            _ = try queueUnanalyzedSummaries(paperIDs: fetchedPaperIDs)
+        }
+        if var latestProfile = try store.fetchQueryProfile(id: profileID) {
+            latestProfile.lastFetchedAt = now
+            try store.upsertQueryProfile(latestProfile)
+        }
+        return true
     }
 
     @discardableResult

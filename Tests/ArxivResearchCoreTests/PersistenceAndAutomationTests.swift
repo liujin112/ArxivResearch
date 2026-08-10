@@ -1,9 +1,59 @@
 import Testing
 import Foundation
+import SQLite3
 @testable import ArxivResearchCore
 
 @Suite("persistence and automation primitives")
 struct PersistenceAndAutomationTests {
+    @Test("Loading latest artifacts uses a constant number of SELECT statements")
+    func latestArtifactsUseConstantStatementCount() throws {
+        var statements: [String] = []
+        let store = try SQLiteResearchStore(
+            path: temporaryDatabaseURL(),
+            onStatementPrepared: { statements.append($0) }
+        )
+        let paperIDs = (0..<20).map { String(format: "2608.%05d", $0) }
+        for paperID in paperIDs {
+            try store.saveAnalysis(LLMAnalysis(
+                paperID: paperID,
+                oneSentenceSummary: "Older \(paperID)",
+                createdAt: Date(timeIntervalSince1970: 1)
+            ))
+            try store.saveAnalysis(LLMAnalysis(
+                paperID: paperID,
+                oneSentenceSummary: "Latest \(paperID)",
+                createdAt: Date(timeIntervalSince1970: 2)
+            ))
+            try store.saveDeepRead(DeepReadReport(
+                paperID: paperID,
+                prompt: "Explain",
+                markdown: "Older \(paperID)",
+                sourceKind: .html,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ))
+            try store.saveDeepRead(DeepReadReport(
+                paperID: paperID,
+                prompt: "Explain",
+                markdown: "Latest \(paperID)",
+                sourceKind: .html,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ))
+        }
+
+        statements.removeAll()
+        let analyses = try store.fetchLatestAnalyses()
+        let deepReads = try store.fetchLatestDeepReads()
+
+        let selectCount = statements.filter {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("SELECT")
+        }.count
+        #expect(selectCount == 2)
+        #expect(analyses.count == paperIDs.count)
+        #expect(deepReads.count == paperIDs.count)
+        #expect(paperIDs.allSatisfy { analyses[$0]?.oneSentenceSummary == "Latest \($0)" })
+        #expect(paperIDs.allSatisfy { deepReads[$0]?.markdown == "Latest \($0)" })
+    }
+
     @Test("SQLite store persists papers analyses query profiles and pending jobs")
     func persistsCoreObjects() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -128,6 +178,21 @@ struct PersistenceAndAutomationTests {
         #expect(abs(try #require(persisted.claimedAt).timeIntervalSince(try #require(claimed.claimedAt))) < 0.001)
     }
 
+    @Test("A pending job can be claimed by only one SQLite connection")
+    func claimJobIsExclusiveAcrossConnections() throws {
+        let databaseURL = temporaryDatabaseURL()
+        let firstStore = try SQLiteResearchStore(path: databaseURL)
+        let secondStore = try SQLiteResearchStore(path: databaseURL)
+        let job = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        try firstStore.enqueue(job)
+
+        let firstClaim = try firstStore.claimJob(id: job.id, deviceID: "app")
+        let secondClaim = try secondStore.claimJob(id: job.id, deviceID: "helper")
+
+        #expect(firstClaim?.state == .running)
+        #expect(secondClaim == nil)
+    }
+
     @Test("Marking succeeded or failed jobs records completion time")
     func markJobTerminalStatesRecordCompletionTime() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
@@ -181,6 +246,73 @@ struct PersistenceAndAutomationTests {
         let jobs = try store.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10)
         #expect(jobs.count == 1)
         #expect(jobs.first?.id == first.id)
+    }
+
+    @Test("SQLite persists active job idempotency across connections")
+    func activeJobIdempotencyIsPersistedAcrossConnections() throws {
+        let databaseURL = temporaryDatabaseURL()
+        let firstStore = try SQLiteResearchStore(path: databaseURL)
+        let secondStore = try SQLiteResearchStore(path: databaseURL)
+        let first = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        let duplicate = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        try firstStore.enqueue(first)
+
+        do {
+            try secondStore.enqueue(duplicate)
+            Issue.record("A second active job with the same idempotency key was inserted")
+        } catch {
+            // The database-level active-job uniqueness constraint rejected it.
+        }
+
+        let jobs = try firstStore.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10)
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.id == first.id)
+    }
+
+    @Test("SQLite migrates legacy jobs to persisted active idempotency")
+    func migratesLegacyJobIdempotencySchema() throws {
+        let databaseURL = temporaryDatabaseURL()
+        var database: OpaquePointer?
+        #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+        #expect(sqlite3_exec(
+            database,
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                json TEXT NOT NULL,
+                scheduled_at REAL NOT NULL
+            );
+            """,
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK)
+        let legacyJob = SyncJob(
+            kind: .summarizeAbstract,
+            payload: Data("2401.12345".utf8),
+            scheduledAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let json = String(decoding: try encoder.encode(legacyJob), as: UTF8.self)
+            .replacingOccurrences(of: "'", with: "''")
+        let insertSQL = """
+        INSERT INTO jobs (id, kind, state, json, scheduled_at)
+        VALUES ('\(legacyJob.id.uuidString)', 'summarizeAbstract', 'pending', '\(json)', 1800000000);
+        """
+        #expect(sqlite3_exec(database, insertSQL, nil, nil, nil) == SQLITE_OK)
+        #expect(sqlite3_close(database) == SQLITE_OK)
+
+        let store = try SQLiteResearchStore(path: databaseURL)
+        let migrated = try #require(try store.fetchJob(id: legacyJob.id))
+        let duplicate = try SyncJob.paperJob(kind: .summarizeAbstract, paperID: "2401.12345")
+        let deduplicated = try store.enqueueIfNeeded(duplicate)
+
+        #expect(migrated.idempotencyKey == "summarizeAbstract:2401.12345")
+        #expect(deduplicated.id == legacyJob.id)
+        #expect(try store.fetchJobs(kind: .summarizeAbstract, state: .pending, limit: 10).count == 1)
     }
 
     @Test("SQLite store deletes paper with related analyses deep reads and paper jobs")
@@ -405,8 +537,10 @@ struct PersistenceAndAutomationTests {
     func runsSingleSelectedJob() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let paper = Paper.fixture(arxivID: "2401.12345")
+        let skippedPaper = Paper.fixture(arxivID: "2401.99999")
         try store.upsertPaper(paper)
-        let skipped = SyncJob(kind: .summarizeAbstract, payload: Data(paper.arxivID.utf8))
+        try store.upsertPaper(skippedPaper)
+        let skipped = SyncJob(kind: .summarizeAbstract, payload: Data(skippedPaper.arxivID.utf8))
         let selected = SyncJob(kind: .summarizeAbstract, payload: Data(paper.arxivID.utf8))
         try store.enqueue(skipped)
         try store.enqueue(selected)
@@ -425,9 +559,9 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJob(id: skipped.id)?.state == .pending)
     }
 
-    @Test("Automation can manually restart one running job")
+    @Test("Automation does not manually reclaim an active running job")
     @MainActor
-    func restartsSelectedRunningJob() async throws {
+    func doesNotRestartSelectedRunningJob() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let paper = Paper.fixture(arxivID: "2401.12345")
         try store.upsertPaper(paper)
@@ -444,9 +578,58 @@ struct PersistenceAndAutomationTests {
 
         let result = try await processor.runJob(id: job.id)
 
+        #expect(result.skipped == 1)
+        #expect(try store.fetchJob(id: job.id)?.state == .running)
+        #expect(try store.latestAnalysis(for: paper.arxivID) == nil)
+    }
+
+    @Test("An arXiv fetch job performs the subscription fetch")
+    @MainActor
+    func automationFetchJobDoesRealWork() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        try store.upsertQueryProfile(profile)
+        let job = SyncJob.queryJob(queryProfileID: profile.id)
+        try store.enqueue(job)
+        let processor = AutomationJobProcessor(
+            store: store,
+            configuration: AutomationConfiguration(activeAnalyzeUnanalyzedPapers: false),
+            arxivClient: StubArxivClient()
+        )
+
+        let result = try await processor.runJob(id: job.id)
+
         #expect(result.succeeded == 1)
         #expect(try store.fetchJob(id: job.id)?.state == .succeeded)
-        #expect(try store.latestAnalysis(for: paper.arxivID)?.oneSentenceSummary == "Useful paper.")
+        #expect(try store.fetchPaper(arxivID: "2401.54321") != nil)
+        #expect(try store.fetchQueryProfile(id: profile.id)?.lastFetchedAt != nil)
+    }
+
+    @Test("Automation does not run pending jobs before their scheduled time")
+    @MainActor
+    func pendingJobsHonorScheduledAt() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let paper = Paper.fixture(arxivID: "2401.12345")
+        try store.upsertPaper(paper)
+        let job = try SyncJob.paperJob(
+            kind: .summarizeAbstract,
+            paperID: paper.arxivID,
+            scheduledAt: Date().addingTimeInterval(3_600)
+        )
+        try store.enqueue(job)
+        let processor = AutomationJobProcessor(
+            store: store,
+            configuration: AutomationConfiguration(
+                llmProvider: StubLLMProvider(),
+                llmAPIKey: "test-key"
+            )
+        )
+
+        let result = try await processor.runPendingJobs(limit: 10)
+
+        #expect(result == AutomationJobRunResult())
+        #expect(try store.fetchJob(id: job.id)?.state == .pending)
+        #expect(try store.latestAnalysis(for: paper.arxivID) == nil)
     }
 
     @Test("Automation retries transient LLM failures")
@@ -519,6 +702,7 @@ struct PersistenceAndAutomationTests {
     }
 
     @Test("Automation fetch can avoid queuing summaries when LLM is unconfigured")
+    @MainActor
     func automationFetchSkipsSummaryQueueWithoutLLM() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
@@ -535,7 +719,49 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJobs().isEmpty)
     }
 
+    @Test("Only one process can lease the same subscription fetch")
+    func queryFetchLeaseIsCrossConnectionSingleFlight() throws {
+        let databaseURL = temporaryDatabaseURL()
+        let firstStore = try SQLiteResearchStore(path: databaseURL)
+        let secondStore = try SQLiteResearchStore(path: databaseURL)
+        let profileID = UUID()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        #expect(try firstStore.claimQueryFetch(profileID: profileID, ownerID: "app", now: now))
+        #expect(try secondStore.claimQueryFetch(profileID: profileID, ownerID: "helper", now: now) == false)
+        try secondStore.releaseQueryFetch(profileID: profileID, ownerID: "helper")
+        #expect(try secondStore.claimQueryFetch(profileID: profileID, ownerID: "helper", now: now) == false)
+        try firstStore.releaseQueryFetch(profileID: profileID, ownerID: "app")
+        #expect(try secondStore.claimQueryFetch(profileID: profileID, ownerID: "helper", now: now))
+    }
+
+    @Test("One failing subscription does not abort later subscriptions")
+    @MainActor
+    func automationContinuesAfterProfileFailure() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let broken = QueryProfile(name: "Broken", rawQuery: "all:broken")
+        let healthy = QueryProfile(name: "Healthy", rawQuery: "all:healthy")
+        try store.upsertQueryProfile(broken)
+        try store.upsertQueryProfile(healthy)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: SelectiveFailureArxivClient(),
+            queueSummaries: false,
+            interProfileDelay: .zero
+        )
+
+        let report = try await service.runOnce(now: Date(timeIntervalSince1970: 1_800_000_000))
+
+        #expect(report.attemptedProfileIDs.count == 2)
+        #expect(Set(report.failures.map(\.profileID)) == Set([broken.id]))
+        #expect(Set(report.succeededProfileIDs) == Set([healthy.id]))
+        #expect(try store.fetchPaper(arxivID: "2401.77777") != nil)
+        #expect(try store.fetchQueryProfile(id: healthy.id)?.lastFetchedAt != nil)
+        #expect(try store.fetchQueryProfile(id: broken.id)?.lastFetchedAt == nil)
+    }
+
     @Test("Automation fetch queues at most one summary job per paper")
+    @MainActor
     func automationFetchDeduplicatesSummaryQueue() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
@@ -555,6 +781,7 @@ struct PersistenceAndAutomationTests {
     }
 
     @Test("Automation queues unanalyzed papers only")
+    @MainActor
     func automationQueuesUnanalyzedPapersOnly() throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let analyzed = Paper.fixture(arxivID: "2401.00001")
@@ -575,6 +802,7 @@ struct PersistenceAndAutomationTests {
     }
 
     @Test("Automation fetch uses query profile max results and submitted-after filter")
+    @MainActor
     func automationFetchUsesQueryProfileRequestSettings() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let client = RecordingArxivClient()
@@ -601,6 +829,7 @@ struct PersistenceAndAutomationTests {
     }
 
     @Test("Automation fetch preserves existing local added date")
+    @MainActor
     func automationFetchPreservesExistingAddedAt() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
@@ -626,6 +855,7 @@ struct PersistenceAndAutomationTests {
     }
 
     @Test("Automation fetch backfills missing local added date from fetch time")
+    @MainActor
     func automationFetchBackfillsMissingAddedAtFromFetchTime() async throws {
         let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
         let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
@@ -813,7 +1043,29 @@ private struct StubArxivClient: ArxivClient {
     }
 }
 
-private final class RecordingArxivClient: ArxivClient {
+private struct SelectiveFailureArxivClient: ArxivClient {
+    func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed {
+        if try request.url().absoluteString.contains("broken") {
+            throw ArxivError.apiError("fixture failure")
+        }
+        return ArxivFeed(
+            totalResults: 1,
+            itemsPerPage: 1,
+            entries: [
+                ArxivEntry(
+                    arxivID: "2401.77777",
+                    versionedID: "2401.77777v1",
+                    title: "Healthy Paper",
+                    summary: "Healthy abstract.",
+                    authors: ["Ada"],
+                    categories: []
+                )
+            ]
+        )
+    }
+}
+
+private final class RecordingArxivClient: ArxivClient, @unchecked Sendable {
     private(set) var requests: [ArxivAPIRequest] = []
 
     func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed {

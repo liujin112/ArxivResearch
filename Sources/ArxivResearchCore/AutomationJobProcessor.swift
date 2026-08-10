@@ -101,6 +101,7 @@ public final class AutomationJobProcessor {
     private let store: SQLiteResearchStore
     private let configuration: AutomationConfiguration
     private let contentExtractor: any ContentExtractor
+    private let arxivClient: any ArxivClient
     private let session: URLSession
     private let onJobStateChange: (() throws -> Void)?
     private static let staleRunningJobTimeout: TimeInterval = 30 * 60
@@ -109,12 +110,14 @@ public final class AutomationJobProcessor {
         store: SQLiteResearchStore,
         configuration: AutomationConfiguration,
         contentExtractor: any ContentExtractor = URLContentExtractor(),
+        arxivClient: any ArxivClient = ArxivHTTPClient(),
         session: URLSession = .shared,
         onJobStateChange: (() throws -> Void)? = nil
     ) {
         self.store = store
         self.configuration = configuration
         self.contentExtractor = contentExtractor
+        self.arxivClient = arxivClient
         self.session = session
         self.onJobStateChange = onJobStateChange
     }
@@ -130,7 +133,7 @@ public final class AutomationJobProcessor {
         var skippedJobIDs = Set<SyncJob.ID>()
 
         while completedJobs < maxJobs {
-            let jobs = try store.fetchJobs(kind: kind, state: .pending, limit: maxJobs)
+            let jobs = try store.fetchPendingJobs(kind: kind, scheduledThrough: Date(), limit: maxJobs)
             guard !jobs.isEmpty else {
                 break
             }
@@ -169,7 +172,7 @@ public final class AutomationJobProcessor {
     }
 
     public func runJob(id: UUID, allowRetryFailed: Bool = true) async throws -> AutomationJobRunResult {
-        let allowedStates: Set<SyncJob.State> = allowRetryFailed ? [.pending, .failed, .running] : [.pending, .running]
+        let allowedStates: Set<SyncJob.State> = allowRetryFailed ? [.pending, .failed] : [.pending]
         return try await runClaimedJob(id: id, allowedStates: allowedStates)
     }
 
@@ -211,7 +214,19 @@ public final class AutomationJobProcessor {
         case .syncZotero:
             try await syncZotero(job)
         case .fetchArxiv:
-            break
+            guard case let .queryProfile(profileID) = try job.typedPayload() else {
+                throw AutomationError.invalidQueryJobPayload
+            }
+            let service = ResearchAutomationService(
+                store: store,
+                arxivClient: arxivClient,
+                queueSummaries: configuration.canProcess(.summarizeAbstract)
+                    && configuration.activeAnalyzeUnanalyzedPapers,
+                interProfileDelay: .zero
+            )
+            guard try await service.runProfile(profileID: profileID) else {
+                throw AutomationError.queryFetchAlreadyRunning
+            }
         }
     }
 
@@ -431,6 +446,8 @@ public enum AutomationError: Error, LocalizedError {
     case missingNotionConfiguration
     case missingZoteroConfiguration
     case invalidJobPayload
+    case invalidQueryJobPayload
+    case queryFetchAlreadyRunning
     case paperNotFound(String)
     case invalidHTTPResponse
     case httpFailure(Int, String)
@@ -445,6 +462,10 @@ public enum AutomationError: Error, LocalizedError {
             "Zotero client configuration is required for this job."
         case .invalidJobPayload:
             "The job payload does not contain a paper ID."
+        case .invalidQueryJobPayload:
+            "The fetch job payload does not contain a subscription ID."
+        case .queryFetchAlreadyRunning:
+            "This subscription is already being fetched by another process."
         case let .paperNotFound(id):
             "Paper \(id) was not found in the local database."
         case .invalidHTTPResponse:

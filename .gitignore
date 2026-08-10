@@ -2,6 +2,8 @@
 .swiftpm/
 DerivedData/
 dist/
+artifacts/
+design-qa.md
 *.xcodeproj
 *.xcworkspace
 *.app

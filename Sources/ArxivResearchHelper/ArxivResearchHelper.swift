@@ -13,10 +13,35 @@ struct ArxivResearchHelper {
                 queueSummaries: configuration?.canProcess(.summarizeAbstract) == true
                     && configuration?.activeAnalyzeUnanalyzedPapers == true
             )
-            try await service.runOnce()
+            var hadFailure = false
+            do {
+                let report = try await service.runOnce()
+                for failure in report.failures {
+                    hadFailure = true
+                    fputs("Subscription \(failure.profileName) failed: \(failure.message)\n", stderr)
+                }
+            } catch {
+                hadFailure = true
+                fputs("Scheduled fetch pass failed: \(error.localizedDescription)\n", stderr)
+            }
             if let configuration {
-                let processor = AutomationJobProcessor(store: store, configuration: configuration)
-                _ = try await processor.runPendingJobs()
+                do {
+                    let processor = AutomationJobProcessor(store: store, configuration: configuration)
+                    _ = try await processor.runPendingJobs()
+                } catch {
+                    hadFailure = true
+                    fputs("Automation job pass failed: \(error.localizedDescription)\n", stderr)
+                }
+            }
+#if os(macOS)
+            DistributedNotificationCenter.default().post(
+                name: .arxivResearchDatabaseDidChange,
+                object: nil,
+                userInfo: nil
+            )
+#endif
+            if hadFailure {
+                exit(1)
             }
             print("ArxivResearchHelper completed one automation pass.")
         } catch {
