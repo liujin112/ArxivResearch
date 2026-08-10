@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ArxivFeed: Codable, Hashable {
+public struct ArxivFeed: Codable, Hashable, Sendable {
     public var totalResults: Int
     public var startIndex: Int
     public var itemsPerPage: Int
@@ -28,7 +28,7 @@ public struct ArxivFeed: Codable, Hashable {
     }
 }
 
-public struct ArxivEntry: Codable, Hashable {
+public struct ArxivEntry: Codable, Hashable, Sendable {
     public var arxivID: String
     public var versionedID: String?
     public var title: String
