@@ -279,6 +279,28 @@ public struct LaunchAgentInstaller {
         )
     }
 
+    /// Unregisters scheduled background fetching and removes its LaunchAgent
+    /// definition. The copied helper executable and logs are retained so a later
+    /// re-enable or a diagnostic review does not lose useful state.
+    public func uninstallAndUnload() throws -> LaunchAgentStatus {
+        try validateLabelAndInterval()
+        let existingStatus = try status()
+        if existingStatus.isLoaded {
+            let result = try runCommand(action: "unregister", arguments: ["bootout", serviceTarget])
+            if result.exitCode != 0, !Self.isServiceNotFound(result) {
+                throw LaunchAgentInstallerError.commandFailed(
+                    action: "unregister",
+                    exitCode: result.exitCode,
+                    diagnostic: result.combinedOutput.nilIfEmpty ?? "launchctl returned no diagnostic output"
+                )
+            }
+        }
+        if FileManager.default.fileExists(atPath: launchAgentPlistURL.path) {
+            try FileManager.default.removeItem(at: launchAgentPlistURL)
+        }
+        return try status()
+    }
+
     /// Inspects both the on-disk plist and launchd's current GUI-session registration.
     public func status() throws -> LaunchAgentStatus {
         try validateLabelAndInterval()

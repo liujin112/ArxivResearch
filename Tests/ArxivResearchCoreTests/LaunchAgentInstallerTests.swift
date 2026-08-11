@@ -132,6 +132,44 @@ struct LaunchAgentInstallerTests {
         #expect(destination == fixture.plistURL)
         #expect(runner.commands.last?.arguments == ["print", fixture.serviceTarget])
     }
+
+    @Test("Disabling background fetching unloads and removes the LaunchAgent definition")
+    func uninstallsLoadedHelper() throws {
+        let fixture = try InstallerFixture()
+        defer { fixture.cleanup() }
+        try FileManager.default.createDirectory(
+            at: fixture.plistURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: fixture.plistURL)
+        let runner = StubLaunchAgentCommandRunner(responses: [.loadedIdle, .success, .notFound])
+        let installer = fixture.installer(runner: runner)
+
+        let status = try installer.uninstallAndUnload()
+
+        #expect(status.state == .notInstalled)
+        #expect(FileManager.default.fileExists(atPath: fixture.plistURL.path) == false)
+        #expect(runner.commands.map(\.arguments) == [
+            ["print", fixture.serviceTarget],
+            ["bootout", fixture.serviceTarget],
+            ["print", fixture.serviceTarget]
+        ])
+    }
+
+    @Test("Disabling an already inactive background service is idempotent")
+    func uninstallIsIdempotent() throws {
+        let fixture = try InstallerFixture()
+        defer { fixture.cleanup() }
+        let runner = StubLaunchAgentCommandRunner(responses: [.notFound, .notFound])
+
+        let status = try fixture.installer(runner: runner).uninstallAndUnload()
+
+        #expect(status.state == .notInstalled)
+        #expect(runner.commands.map(\.arguments) == [
+            ["print", fixture.serviceTarget],
+            ["print", fixture.serviceTarget]
+        ])
+    }
 }
 
 private final class StubLaunchAgentCommandRunner: LaunchAgentCommandRunning {

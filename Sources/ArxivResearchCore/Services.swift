@@ -156,17 +156,13 @@ public final class ResearchAutomationService {
 
     @discardableResult
     public func runOnce(now: Date = Date()) async throws -> ResearchAutomationRunReport {
-        let profiles = try store.fetchQueryProfiles().filter { profile in
-            guard profile.isEnabled else { return false }
-            guard let lastFetchedAt = profile.lastFetchedAt else { return true }
-            return now.timeIntervalSince(lastFetchedAt) >= Double(profile.refreshIntervalHours * 3600)
-        }
+        let profiles = try store.fetchQueryProfiles().filter { $0.isDue(at: now) }
 
         var report = ResearchAutomationRunReport()
         for (index, profile) in profiles.enumerated() {
             report.attemptedProfileIDs.append(profile.id)
             do {
-                if try await runProfile(profileID: profile.id, now: now) {
+                if try await runProfile(profileID: profile.id, now: now, onlyIfDueAt: now) {
                     report.succeededProfileIDs.append(profile.id)
                 } else {
                     report.skippedProfileIDs.append(profile.id)
@@ -197,15 +193,25 @@ public final class ResearchAutomationService {
     public func runProfile(
         profileID: QueryProfile.ID,
         now: Date = Date(),
-        leaseOwnerID: String = "automation-\(UUID().uuidString)"
+        leaseOwnerID: String = "automation-\(UUID().uuidString)",
+        onlyIfDueAt dueDate: Date? = nil
     ) async throws -> Bool {
-        guard let profile = try store.fetchQueryProfile(id: profileID) else {
+        guard try store.fetchQueryProfile(id: profileID) != nil else {
             throw ResearchAutomationError.profileNotFound(profileID)
         }
         guard try store.claimQueryFetch(profileID: profileID, ownerID: leaseOwnerID, now: now) else {
             return false
         }
         defer { try? store.releaseQueryFetch(profileID: profileID, ownerID: leaseOwnerID) }
+
+        // Re-read after taking the cross-process lease. Another app/helper pass may
+        // have completed between the initial due scan and this claim.
+        guard let profile = try store.fetchQueryProfile(id: profileID) else {
+            throw ResearchAutomationError.profileNotFound(profileID)
+        }
+        if let dueDate, !profile.isDue(at: dueDate) {
+            return false
+        }
 
         let request = ArxivAPIRequest(searchQuery: .raw(profile.requestRawQuery), maxResults: profile.maxResults)
         let feed = try await arxivClient.search(request)

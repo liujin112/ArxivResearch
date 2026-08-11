@@ -719,6 +719,111 @@ struct PersistenceAndAutomationTests {
         #expect(try store.fetchJobs().isEmpty)
     }
 
+    @Test("Subscription due logic honors enabled state, interval, and the exact boundary")
+    func subscriptionDueLogicIsSharedAndDeterministic() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var profile = QueryProfile(name: "Agents", rawQuery: "all:agent", refreshIntervalHours: 24)
+
+        #expect(profile.isDue(at: now))
+        profile.lastFetchedAt = now.addingTimeInterval(-23 * 3_600)
+        #expect(profile.isDue(at: now) == false)
+        profile.lastFetchedAt = now.addingTimeInterval(-24 * 3_600)
+        #expect(profile.nextFetchAt == now)
+        #expect(profile.isDue(at: now))
+        profile.isEnabled = false
+        #expect(profile.isDue(at: now) == false)
+    }
+
+    @Test("Automatic pass skips disabled and not-yet-due subscriptions")
+    @MainActor
+    func automaticPassFetchesOnlyDueEnabledSubscriptions() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let recentFetch = now.addingTimeInterval(-3_600)
+        let notDue = QueryProfile(
+            name: "Recent",
+            rawQuery: "all:recent",
+            refreshIntervalHours: 24,
+            lastFetchedAt: recentFetch
+        )
+        let disabled = QueryProfile(name: "Paused", rawQuery: "all:paused", isEnabled: false)
+        let due = QueryProfile(
+            name: "Six-hour feed",
+            rawQuery: "all:due",
+            refreshIntervalHours: 6,
+            lastFetchedAt: now.addingTimeInterval(-7 * 3_600)
+        )
+        let client = RecordingArxivClient()
+        try store.upsertQueryProfile(notDue)
+        try store.upsertQueryProfile(disabled)
+        try store.upsertQueryProfile(due)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: client,
+            queueSummaries: false,
+            interProfileDelay: .zero
+        )
+
+        let report = try await service.runOnce(now: now)
+
+        #expect(report.attemptedProfileIDs == [due.id])
+        #expect(report.succeededProfileIDs == [due.id])
+        #expect(client.requests.count == 1)
+        #expect(try store.fetchQueryProfile(id: notDue.id)?.lastFetchedAt == recentFetch)
+        #expect(try store.fetchQueryProfile(id: disabled.id)?.lastFetchedAt == nil)
+        #expect(try store.fetchQueryProfile(id: due.id)?.lastFetchedAt == now)
+    }
+
+    @Test("Due fetch rechecks after the lease and prevents a repeated automatic fetch")
+    @MainActor
+    func dueFetchIsSingleFlightAcrossConsecutivePasses() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = QueryProfile(name: "Agents", rawQuery: "all:agent")
+        let client = RecordingArxivClient()
+        try store.upsertQueryProfile(profile)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: client,
+            queueSummaries: false,
+            interProfileDelay: .zero
+        )
+
+        let first = try await service.runProfile(profileID: profile.id, now: now, onlyIfDueAt: now)
+        let repeated = try await service.runProfile(profileID: profile.id, now: now, onlyIfDueAt: now)
+
+        #expect(first)
+        #expect(repeated == false)
+        #expect(client.requests.count == 1)
+        #expect(try store.fetchQueryProfile(id: profile.id)?.lastFetchedAt == now)
+    }
+
+    @Test("A failed fetch preserves the previous successful fetch time")
+    @MainActor
+    func failedFetchDoesNotAdvanceLastSuccessfulTime() async throws {
+        let store = try SQLiteResearchStore(path: temporaryDatabaseURL())
+        let previousSuccess = Date(timeIntervalSince1970: 1_700_000_000)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let profile = QueryProfile(
+            name: "Broken",
+            rawQuery: "all:broken",
+            lastFetchedAt: previousSuccess
+        )
+        try store.upsertQueryProfile(profile)
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: SelectiveFailureArxivClient(),
+            queueSummaries: false,
+            interProfileDelay: .zero
+        )
+
+        await #expect(throws: ArxivError.self) {
+            try await service.runProfile(profileID: profile.id, now: now, onlyIfDueAt: now)
+        }
+
+        #expect(try store.fetchQueryProfile(id: profile.id)?.lastFetchedAt == previousSuccess)
+    }
+
     @Test("Only one process can lease the same subscription fetch")
     func queryFetchLeaseIsCrossConnectionSingleFlight() throws {
         let databaseURL = temporaryDatabaseURL()

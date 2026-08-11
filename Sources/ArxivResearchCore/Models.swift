@@ -40,6 +40,19 @@ public struct QueryProfile: Identifiable, Codable, Hashable, Sendable {
         Self.composeRequestRawQuery(rawQuery: rawQuery, submittedAfter: submittedAfter)
     }
 
+    /// The next time this subscription becomes eligible for an automatic fetch.
+    /// A subscription that has never completed a fetch is eligible immediately.
+    public var nextFetchAt: Date? {
+        lastFetchedAt?.addingTimeInterval(Double(refreshIntervalHours) * 3_600)
+    }
+
+    /// Shared due logic used by both the foreground app and the background helper.
+    public func isDue(at now: Date) -> Bool {
+        guard isEnabled else { return false }
+        guard let nextFetchAt else { return true }
+        return now >= nextFetchAt
+    }
+
     public static func composeRequestRawQuery(rawQuery: String, submittedAfter: Date?) -> String {
         let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let submittedAfter else {

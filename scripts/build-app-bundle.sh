@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT/.build/ModuleCache}"
-APP_VERSION="${APP_VERSION:-0.1.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+APP_VERSION="${APP_VERSION:-0.2.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-2}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 swift build -c release --product ArxivResearchApp

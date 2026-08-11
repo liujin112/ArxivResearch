@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import ArxivResearchCore
 
 enum LibrarySidebarSelection: Hashable {
@@ -46,6 +47,24 @@ private struct AutomationInstallSnapshot: Sendable {
     var errorDescription: String?
 }
 
+private enum AutomaticFetchTrigger: String, Sendable {
+    case appLaunch
+    case becameActive
+    case systemWake
+    case hourlyCheck
+    case manualCheck
+
+    var statusDescription: String {
+        switch self {
+        case .appLaunch: "app launch"
+        case .becameActive: "app activation"
+        case .systemWake: "wake"
+        case .hourlyCheck: "hourly check"
+        case .manualCheck: "manual check"
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var queryProfiles: [QueryProfile] = []
@@ -69,6 +88,8 @@ final class AppState: ObservableObject {
     @Published var automationLastError: String?
     @Published var launchAgentStatus: LaunchAgentStatus?
     @Published var launchAgentStatusError: String?
+    @Published private(set) var backgroundAutomaticFetchingEnabled = false
+    @Published private(set) var isUpdatingBackgroundAutomaticFetching = false
     @Published var isActivityRailVisible = true
 
     @Published var providerKind: ProviderKind = .openAI
@@ -114,6 +135,9 @@ final class AppState: ObservableObject {
     private var databaseChangeObserver: NSObjectProtocol?
     private var automationStatusTask: Task<Void, Never>?
     private var helperInstallTask: Task<Void, Never>?
+    private var automaticFetchTask: Task<Void, Never>?
+    private var periodicDueCheckTask: Task<Void, Never>?
+    private var workspaceWakeObserver: NSObjectProtocol?
 
     var selectedPaper: Paper? {
         papers.first { $0.id == selectedPaperID }
@@ -134,12 +158,10 @@ final class AppState: ObservableObject {
     }
 
     var nextScheduledFetchAt: Date? {
-        queryProfiles
+        let now = Date()
+        return queryProfiles
             .filter(\.isEnabled)
-            .compactMap { profile in
-                guard let lastFetchedAt = profile.lastFetchedAt else { return Date() }
-                return Calendar.current.date(byAdding: .hour, value: profile.refreshIntervalHours, to: lastFetchedAt)
-            }
+            .map { $0.nextFetchAt ?? now }
             .min()
     }
 
@@ -232,6 +254,7 @@ final class AppState: ObservableObject {
     }
 
     init() {
+        backgroundAutomaticFetchingEnabled = defaults.bool(forKey: DefaultsKey.backgroundAutomaticFetching)
         loadSettings()
         do {
             let dbURL = try AppEnvironment.defaultDatabaseURL()
@@ -252,7 +275,24 @@ final class AppState: ObservableObject {
                 self?.refreshExternalChanges(reportStatus: false)
             }
         }
+
+        workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshExternalChanges(reportStatus: false)
+                self?.scheduleAutomaticFetch(trigger: .systemWake)
+            }
+        }
 #endif
+        startForegroundAutomaticFetching()
+    }
+
+    deinit {
+        automaticFetchTask?.cancel()
+        periodicDueCheckTask?.cancel()
     }
 
     func load() throws {
@@ -309,6 +349,83 @@ final class AppState: ObservableObject {
             }
         } catch {
             statusMessage = "Could not refresh background changes: \(error.localizedDescription)"
+        }
+    }
+
+    func handleAppBecameActive() {
+        refreshExternalChanges(reportStatus: false)
+        scheduleAutomaticFetch(trigger: .becameActive)
+    }
+
+    func checkForDueSubscriptionsNow() {
+        scheduleAutomaticFetch(trigger: .manualCheck)
+    }
+
+    private func startForegroundAutomaticFetching() {
+        scheduleAutomaticFetch(trigger: .appLaunch)
+        periodicDueCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(3_600))
+                } catch {
+                    return
+                }
+                if let self {
+                    self.scheduleAutomaticFetch(trigger: .hourlyCheck)
+                } else {
+                    return
+                }
+            }
+        }
+    }
+
+    private func scheduleAutomaticFetch(trigger: AutomaticFetchTrigger) {
+        guard automaticFetchTask == nil else { return }
+        automaticFetchTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performAutomaticFetch(trigger: trigger)
+            self.automaticFetchTask = nil
+        }
+    }
+
+    private func performAutomaticFetch(trigger: AutomaticFetchTrigger) async {
+        guard let store else { return }
+        let now = Date()
+        let settings = currentRuntimeSettings()
+        let shouldQueueSummaries = settings.activeAnalyzeUnanalyzedPapers
+            && settings.canQueueSummariesWithoutSecrets
+        let service = ResearchAutomationService(
+            store: store,
+            arxivClient: ArxivHTTPClient(),
+            queueSummaries: shouldQueueSummaries
+        )
+
+        do {
+            let report = try await service.runOnce(now: now)
+            try load()
+
+            if !report.failures.isEmpty {
+                let failedNames = report.failures.map(\.profileName).joined(separator: ", ")
+                let message = "Automatic fetch after \(trigger.statusDescription) failed for: \(failedNames)"
+                automationLastError = message
+                statusMessage = message
+            } else if !report.succeededProfileIDs.isEmpty {
+                automationLastError = nil
+                let count = report.succeededProfileIDs.count
+                statusMessage = count == 1
+                    ? "Automatically fetched 1 overdue subscription after \(trigger.statusDescription)."
+                    : "Automatically fetched \(count) overdue subscriptions after \(trigger.statusDescription)."
+            }
+
+            if shouldQueueSummaries, report.succeededProfileIDs.isEmpty == false {
+                startQueuedJobsIfIdle()
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            let message = "Automatic fetch check failed: \(error.localizedDescription)"
+            automationLastError = message
+            statusMessage = message
         }
     }
 
@@ -1019,13 +1136,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    func installLaunchAgent() {
+    func setBackgroundAutomaticFetchingEnabled(_ enabled: Bool) {
+        configureBackgroundAutomaticFetching(enabled: enabled, force: false)
+    }
+
+    func repairBackgroundAutomaticFetching() {
+        configureBackgroundAutomaticFetching(enabled: true, force: true)
+    }
+
+    private func configureBackgroundAutomaticFetching(enabled: Bool, force: Bool) {
         guard helperInstallTask == nil else {
-            statusMessage = "Automation helper installation is already running."
+            statusMessage = "Background automatic fetching is already being updated."
             return
         }
+        guard force || enabled != backgroundAutomaticFetchingEnabled else { return }
         let helperURL = automationHelperURL
-        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+        if enabled, !FileManager.default.isExecutableFile(atPath: helperURL.path) {
             let error = AppActionError.helperNotFound(helperURL.path)
             launchAgentStatusError = error.localizedDescription
             automationLastError = error.localizedDescription
@@ -1035,13 +1161,22 @@ final class AppState: ObservableObject {
         let operationID = UUID()
         busyOperationIDs.insert(operationID)
         isWorking = true
-        statusMessage = "Installing automation helper…"
+        isUpdatingBackgroundAutomaticFetching = true
+        statusMessage = enabled
+            ? "Turning on background automatic fetching…"
+            : "Turning off background automatic fetching…"
         helperInstallTask = Task { [weak self] in
             let snapshot = await Task.detached(priority: .userInitiated) {
                 do {
-                    let result = try LaunchAgentInstaller(helperExecutableURL: helperURL).installAndLoad()
+                    let installer = LaunchAgentInstaller(helperExecutableURL: helperURL)
+                    let status: LaunchAgentStatus
+                    if enabled {
+                        status = try installer.installAndLoad().status
+                    } else {
+                        status = try installer.uninstallAndUnload()
+                    }
                     return AutomationInstallSnapshot(
-                        status: result.status,
+                        status: status,
                         errorDescription: nil
                     )
                 } catch {
@@ -1055,15 +1190,18 @@ final class AppState: ObservableObject {
             self.busyOperationIDs.remove(operationID)
             self.isWorking = !self.busyOperationIDs.isEmpty
             self.helperInstallTask = nil
+            self.isUpdatingBackgroundAutomaticFetching = false
             if let status = snapshot.status {
                 self.launchAgentStatus = status
                 self.launchAgentStatusError = nil
                 self.automationLastError = nil
-                self.statusMessage = status.isLoaded
-                    ? "Scheduled fetching is installed and on schedule."
-                    : "Automation helper installed, but launchd has not loaded it."
+                self.backgroundAutomaticFetchingEnabled = enabled
+                self.defaults.set(enabled, forKey: DefaultsKey.backgroundAutomaticFetching)
+                self.statusMessage = enabled
+                    ? "Background automatic fetching is on."
+                    : "Background automatic fetching is off; app-open checks remain active."
             } else {
-                let message = snapshot.errorDescription ?? "Automation helper installation failed."
+                let message = snapshot.errorDescription ?? "Could not update background automatic fetching."
                 self.launchAgentStatusError = message
                 self.automationLastError = message
                 self.statusMessage = message
@@ -1089,6 +1227,10 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.launchAgentStatus = snapshot.status
             self.launchAgentStatusError = snapshot.errorDescription
+            if snapshot.status?.isLoaded == true, !self.backgroundAutomaticFetchingEnabled {
+                self.backgroundAutomaticFetchingEnabled = true
+                self.defaults.set(true, forKey: DefaultsKey.backgroundAutomaticFetching)
+            }
             self.automationStatusTask = nil
         }
     }
@@ -1623,6 +1765,7 @@ final class AppState: ObservableObject {
 }
 
 private enum DefaultsKey {
+    static let backgroundAutomaticFetching = "automation.backgroundAutomaticFetching"
     static let providerKind = "provider.kind"
     static let providerModel = "provider.model"
     static let providerDeploymentName = "provider.deploymentName"

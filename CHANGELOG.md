@@ -6,6 +6,25 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-11
+
+### Added
+
+- Foreground automatic subscription checks on app launch, app activation, system wake, and every 60 minutes while ArxivResearch remains open.
+- Optional background automatic fetching setting that registers scheduled launchd work when enabled and unregisters it when disabled.
+- Advanced background diagnostics with service state, repair controls, and log access outside the primary automation workflow.
+
+### Changed
+
+- Foreground and background schedulers now share one per-subscription due calculation based on the last successful fetch and each subscription's refresh interval.
+- Automation health and schedule UI now treats app-open checks as the default behavior instead of requiring a helper installation.
+
+### Fixed
+
+- Automatic fetches recheck subscription eligibility after acquiring the cross-process lease, preventing a foreground and background pass from fetching the same subscription back to back.
+- Failed arXiv requests leave the previous successful fetch timestamp unchanged so overdue subscriptions remain eligible for retry.
+- Disabled and not-yet-due subscriptions are consistently skipped by both foreground and background passes.
+
 ## [0.1.0] - 2026-08-10
 
 ### Added

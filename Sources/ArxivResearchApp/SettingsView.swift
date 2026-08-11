@@ -430,93 +430,96 @@ private struct AutomationSettingsView: View {
     var body: some View {
         SettingsPage(
             title: "Automation",
-            subtitle: "Make scheduled fetching visible, testable, and easy to repair."
+            subtitle: "Keep subscriptions current while the app is open, with optional background fetching after you quit."
         ) {
             SettingsCard(
-                title: "Automation Health",
-                subtitle: helperInstalled
-                    ? "The hourly helper checks which subscriptions are due."
-                    : "Install the helper before relying on scheduled fetching.",
+                title: "Automatic Fetching",
+                subtitle: "The app checks on launch, wake, activation, and once per hour while it remains open.",
                 systemImage: "clock.arrow.circlepath"
             ) {
                 HStack {
                     SettingsStatusPill(
-                        text: automationNeedsAttention ? "Needs attention" : "Ready",
+                        text: automationNeedsAttention ? "Needs attention" : "App-open checks active",
                         systemImage: automationNeedsAttention ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                         color: automationNeedsAttention ? .red : .green
                     )
                     Spacer()
-                    Text(helperStatusText)
+                    Text(backgroundStatusText)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
 
                 Divider()
-                SettingsValueRow(label: "launchd status", value: helperStatusText)
-                Divider()
                 SettingsValueRow(label: "Last successful fetch", value: formatted(lastSuccessfulFetch, fallback: "Never"))
                 Divider()
-                SettingsValueRow(label: "Next scheduled run", value: nextScheduledRunText)
+                SettingsValueRow(label: "Next due subscription", value: nextScheduledRunText)
                 Divider()
-                SettingsValueRow(label: "Schedule", value: "Checks hourly; each subscription keeps its own interval")
-                Divider()
-                SettingsValueRow(label: "Time zone", value: TimeZone.current.localizedName(for: .standard, locale: .current) ?? TimeZone.current.identifier)
+                SettingsValueRow(label: "App-open checks", value: "Launch, wake, activation, and every 60 minutes")
                 Divider()
                 SettingsValueRow(
                     label: "Subscriptions",
                     value: "\(enabledProfiles.count) enabled · \(disabledProfileCount) paused"
                 )
+
+                Divider()
+                Toggle(
+                    "Background automatic fetching",
+                    isOn: Binding(
+                        get: { state.backgroundAutomaticFetchingEnabled },
+                        set: { state.setBackgroundAutomaticFetchingEnabled($0) }
+                    )
+                )
+                .disabled(state.isUpdatingBackgroundAutomaticFetching)
+
+                Text(state.backgroundAutomaticFetchingEnabled
+                    ? "ArxivResearch will continue hourly due checks after the app is closed."
+                    : "Optional. Leave this off if checking whenever the app opens is enough.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if state.backgroundAutomaticFetchingEnabled,
+                   let error = state.launchAgentStatusError,
+                   !error.isEmpty {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                }
             }
 
             SettingsCard(
                 title: "Controls",
-                subtitle: "Run a safe check now or repair the background helper.",
+                subtitle: "Check only overdue subscriptions, fetch everything now, or test the arXiv connection.",
                 systemImage: "switch.2"
             ) {
-                Stepper("Helper interval: 60 minutes", value: .constant(60), in: 60...60)
-                    .disabled(true)
-
                 HStack(spacing: 10) {
                     Button {
                         Task { await testAutomation() }
                     } label: {
-                        Label("Test Fetch", systemImage: "checkmark.seal")
+                        Label("Test Connection", systemImage: "checkmark.seal")
                     }
                     .disabled(state.isWorking || enabledProfiles.isEmpty)
 
                     Button {
-                        Task { await runAutomationNow() }
+                        state.checkForDueSubscriptionsNow()
                     } label: {
-                        Label("Run Now", systemImage: "play.fill")
+                        Label("Check Due Now", systemImage: "clock.badge.checkmark")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(state.isWorking || enabledProfiles.isEmpty)
 
-                    Spacer()
-
                     Button {
-                        state.installLaunchAgent()
+                        runAutomationNow()
                     } label: {
-                        Label(
-                            helperInstalled ? "Repair / Reinstall" : "Install Helper",
-                            systemImage: helperInstalled ? "wrench.and.screwdriver" : "timer"
-                        )
+                        Label("Fetch All Now", systemImage: "arrow.down.circle")
                     }
-                    .disabled(state.isWorking)
-
-                    Button {
-                        openAutomationLogs()
-                    } label: {
-                        Label("Open Logs", systemImage: "doc.text.magnifyingglass")
-                    }
-                    .disabled(!logsDirectoryExists)
-                    .help(logsDirectoryExists ? "Open helper logs in Finder" : "Logs will appear after the helper runs")
+                    .disabled(state.isWorking || enabledProfiles.isEmpty)
                 }
             }
 
             SettingsCard(
                 title: "Subscription Schedules",
-                subtitle: "The helper only fetches enabled subscriptions whose interval has elapsed.",
+                subtitle: "Each enabled subscription keeps its own interval; automatic checks fetch only those already due.",
                 systemImage: "calendar.badge.clock"
             ) {
                 if state.queryProfiles.isEmpty {
@@ -533,6 +536,38 @@ private struct AutomationSettingsView: View {
                             Divider()
                         }
                     }
+                }
+            }
+
+            SettingsCard(
+                title: "Advanced Diagnostics",
+                subtitle: "Background service state and logs are available here when troubleshooting is needed.",
+                systemImage: "stethoscope"
+            ) {
+                DisclosureGroup("Background service details") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SettingsValueRow(label: "Background status", value: helperStatusText)
+                        SettingsValueRow(label: "Service identifier", value: helperLabel)
+                        if let error = state.launchAgentStatusError, !error.isEmpty {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                        HStack {
+                            if state.backgroundAutomaticFetchingEnabled {
+                                Button("Repair Background Service") {
+                                    state.repairBackgroundAutomaticFetching()
+                                }
+                                .disabled(state.isWorking)
+                            }
+                            Button("Open Background Logs") {
+                                openAutomationLogs()
+                            }
+                            .disabled(!logsDirectoryExists)
+                        }
+                    }
+                    .padding(.top, 8)
                 }
             }
 
@@ -566,36 +601,19 @@ private struct AutomationSettingsView: View {
     }
 
     private var nextScheduledRun: Date? {
-        enabledProfiles.map { profile in
-            guard let lastFetchedAt = profile.lastFetchedAt else { return Date() }
-            return lastFetchedAt.addingTimeInterval(Double(profile.refreshIntervalHours * 3_600))
-        }.min()
+        let now = Date()
+        return enabledProfiles.map { $0.nextFetchAt ?? now }.min()
     }
 
     private var nextScheduledRunText: String {
-        guard helperReady, let nextScheduledRun else { return "Not scheduled" }
+        guard let nextScheduledRun else { return "Not scheduled" }
         if nextScheduledRun <= Date() { return "Due now" }
         return formatted(nextScheduledRun, fallback: "Not scheduled")
-    }
-
-    private var helperPlistURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
-            .appendingPathComponent("\(helperLabel).plist")
     }
 
     private var logsDirectoryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/ArxivResearch", isDirectory: true)
-    }
-
-    private var helperInstalled: Bool {
-        state.launchAgentStatus?.isInstalled
-            ?? FileManager.default.fileExists(atPath: helperPlistURL.path)
-    }
-
-    private var helperReady: Bool {
-        state.launchAgentStatus?.isLoaded == true
     }
 
     private var helperStatusText: String {
@@ -618,8 +636,21 @@ private struct AutomationSettingsView: View {
         FileManager.default.fileExists(atPath: logsDirectoryURL.path)
     }
 
+    private var backgroundStatusText: String {
+        if state.isUpdatingBackgroundAutomaticFetching {
+            return "Updating background setting…"
+        }
+        if state.backgroundAutomaticFetchingEnabled {
+            return state.launchAgentStatus?.isLoaded == true ? "Background on" : "Background needs attention"
+        }
+        return "Background off"
+    }
+
     private var automationNeedsAttention: Bool {
-        !helperReady || enabledProfiles.isEmpty || state.launchAgentStatusError != nil
+        enabledProfiles.isEmpty
+            || state.automationLastError != nil
+            || (state.backgroundAutomaticFetchingEnabled
+                && (state.launchAgentStatus?.isLoaded != true || state.launchAgentStatusError != nil))
     }
 
     private func formatted(_ date: Date?, fallback: String) -> String {
@@ -634,7 +665,7 @@ private struct AutomationSettingsView: View {
         await state.testQuery(rawQuery: profile.requestRawQuery, maxResults: profile.maxResults)
     }
 
-    private func runAutomationNow() async {
+    private func runAutomationNow() {
         guard !enabledProfiles.isEmpty else {
             state.statusMessage = "Enable a subscription before running automation"
             return
@@ -644,7 +675,7 @@ private struct AutomationSettingsView: View {
 
     private func openAutomationLogs() {
         guard logsDirectoryExists else {
-            state.statusMessage = "Automation logs will appear after the helper runs"
+            state.statusMessage = "Background logs will appear after background fetching runs"
             return
         }
         NSWorkspace.shared.open(logsDirectoryURL)
@@ -881,8 +912,8 @@ private struct SubscriptionScheduleRow: View {
 
     private var nextRunText: String {
         guard profile.isEnabled else { return "Not scheduled" }
-        guard let lastFetchedAt = profile.lastFetchedAt else { return "Ready now" }
-        let date = lastFetchedAt.addingTimeInterval(Double(profile.refreshIntervalHours * 3_600))
+        guard let date = profile.nextFetchAt else { return "Ready now" }
+        if profile.isDue(at: Date()) { return "Due now" }
         return "Next " + date.formatted(date: .abbreviated, time: .shortened)
     }
 

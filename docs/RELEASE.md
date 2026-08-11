@@ -108,24 +108,24 @@ Create the final release archive:
 
 ```sh
 ditto -c -k --keepParent .build/release/ArxivResearch.app \
-  .build/release/ArxivResearch-v0.1.0-macos.zip
+  .build/release/ArxivResearch-v0.2.0-macos-arm64.zip
 ```
 
 ## Tag And Publish
 
 ```sh
-git tag -a v0.1.0 -m "v0.1.0"
+git tag -a v0.2.0 -m "v0.2.0"
 git push origin main
-git push origin v0.1.0
+git push origin v0.2.0
 ```
 
 Create a GitHub Release:
 
 ```sh
-gh release create v0.1.0 \
-  .build/release/ArxivResearch-v0.1.0-macos.zip \
-  --title "ArxivResearch v0.1.0" \
-  --notes-file CHANGELOG.md
+gh release create v0.2.0 \
+  .build/release/ArxivResearch-v0.2.0-macos-arm64.zip \
+  --title "ArxivResearch v0.2.0" \
+  --notes-file docs/releases/v0.2.0.md
 ```
 
 For a first public release, write curated release notes instead of uploading the entire changelog as-is.

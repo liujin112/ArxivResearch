@@ -175,7 +175,7 @@ struct ResearchWorkspaceView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                state.refreshExternalChanges()
+                state.handleAppBecameActive()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .arxivFocusPaperSearch)) { _ in
@@ -906,7 +906,8 @@ private struct AutomationActivityRail: View {
                     FailureSummaryView()
                 }
 
-                if state.launchAgentStatus?.isLoaded != true {
+                if state.backgroundAutomaticFetchingEnabled,
+                   state.launchAgentStatus?.isLoaded != true {
                     AutomationHelperRepairView()
                 }
 
@@ -957,32 +958,25 @@ private struct AutomationHealthSummary: View {
     }
 
     private var needsAttention: Bool {
-        state.launchAgentStatus?.isLoaded != true
-            || !state.failedJobs.isEmpty
+        !state.failedJobs.isEmpty
             || state.automationLastError != nil
+            || (state.backgroundAutomaticFetchingEnabled && state.launchAgentStatus?.isLoaded != true)
     }
 
     private var healthTitle: String {
-        if state.launchAgentStatus == nil, state.launchAgentStatusError == nil {
-            return "Checking automation…"
-        }
-        return needsAttention ? "Needs attention" : "On schedule"
+        if state.enabledSubscriptionCount == 0 { return "No enabled subscriptions" }
+        return needsAttention ? "Needs attention" : "Automatic checks active"
     }
     private var healthIcon: String {
-        if state.launchAgentStatus == nil, state.launchAgentStatusError == nil {
-            return "arrow.triangle.2.circlepath"
-        }
+        if state.enabledSubscriptionCount == 0 { return "pause.circle" }
         return needsAttention ? "exclamationmark.triangle" : "checkmark.circle"
     }
     private var healthColor: Color {
-        if state.launchAgentStatus == nil, state.launchAgentStatusError == nil {
-            return .secondary
-        }
+        if state.enabledSubscriptionCount == 0 { return .secondary }
         return needsAttention ? .red : .green
     }
 
     private var nextRunText: String {
-        guard state.launchAgentStatus?.isLoaded == true else { return "Not scheduled" }
         guard let next = state.nextScheduledFetchAt else { return "Not scheduled" }
         if next <= Date() { return "Due now" }
         return next.formatted(date: .abbreviated, time: .shortened)
@@ -995,14 +989,14 @@ private struct AutomationHelperRepairView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Label("Background helper", systemImage: "timer")
+                Label("Background automatic fetching", systemImage: "timer")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Text(helperState)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-            Text(state.launchAgentStatusError ?? "Scheduled fetching is not active on this Mac.")
+            Text(state.launchAgentStatusError ?? "Background fetching is enabled but its service is not active.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
@@ -1012,8 +1006,8 @@ private struct AutomationHelperRepairView: View {
                 }
                 .buttonStyle(.link)
                 Spacer()
-                Button(state.launchAgentStatus?.isInstalled == true ? "Repair" : "Install helper") {
-                    state.installLaunchAgent()
+                Button("Repair") {
+                    state.repairBackgroundAutomaticFetching()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(state.isWorking)
@@ -1857,7 +1851,9 @@ private struct LibraryContextRail: View {
     }
 
     private var automationNeedsAttention: Bool {
-        state.launchAgentStatus?.isLoaded != true || !state.failedJobs.isEmpty || state.automationLastError != nil
+        !state.failedJobs.isEmpty
+            || state.automationLastError != nil
+            || (state.backgroundAutomaticFetchingEnabled && state.launchAgentStatus?.isLoaded != true)
     }
 
     private var automationHealthTitle: String {
@@ -1869,7 +1865,7 @@ private struct LibraryContextRail: View {
     }
 
     private var nextFetchText: String {
-        guard state.launchAgentStatus?.isLoaded == true, let next = state.nextScheduledFetchAt else {
+        guard let next = state.nextScheduledFetchAt else {
             return "Not scheduled"
         }
         if next <= Date() { return "Due now" }
