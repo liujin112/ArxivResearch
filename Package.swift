@@ -15,25 +15,36 @@ let package = Package(
         .executable(name: "ArxivResearchHelper", targets: ["ArxivResearchHelper"]),
         .executable(name: "ArxivResearchMobileApp", targets: ["ArxivResearchMobileApp"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.2")
+    ],
     targets: [
         .target(
             name: "ArxivResearchCore",
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
                 .linkedFramework("PDFKit"),
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                .linkedFramework("LocalAuthentication")
             ]
         ),
         .executableTarget(
             name: "ArxivResearchApp",
-            dependencies: ["ArxivResearchCore"],
+            dependencies: [
+                "ArxivResearchCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             resources: [
                 .process("Resources")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
-                .linkedFramework("WebKit")
+                .linkedFramework("WebKit"),
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ])
             ]
         ),
         .target(

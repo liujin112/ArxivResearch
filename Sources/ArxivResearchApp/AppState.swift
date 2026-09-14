@@ -79,6 +79,7 @@ final class AppState: ObservableObject {
     @Published var selectedPaperIDs: Set<Paper.ID> = []
     @Published var latestAnalysesByPaperID: [String: LLMAnalysis] = [:]
     @Published private(set) var latestDeepReadsByPaperID: [String: DeepReadReport] = [:]
+    @Published var presentedDeepRead: DeepReadReport?
     @Published var statusMessage = "Ready"
     @Published var pendingJobCount = 0
     @Published var recentJobs: [SyncJob] = []
@@ -138,6 +139,8 @@ final class AppState: ObservableObject {
     private var automaticFetchTask: Task<Void, Never>?
     private var periodicDueCheckTask: Task<Void, Never>?
     private var workspaceWakeObserver: NSObjectProtocol?
+    private var cachedKeychainValues: [String: String] = [:]
+    private var missingKeychainValues = Set<String>()
 
     var selectedPaper: Paper? {
         papers.first { $0.id == selectedPaperID }
@@ -151,6 +154,34 @@ final class AppState: ObservableObject {
     var deepReadMarkdown: String {
         guard let selectedPaperID else { return "" }
         return latestDeepReadsByPaperID[selectedPaperID]?.markdown ?? ""
+    }
+
+    func deepReadReport(for paperID: Paper.ID) -> DeepReadReport? {
+        guard let report = latestDeepReadsByPaperID[paperID],
+              !report.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return report
+    }
+
+    @discardableResult
+    func presentDeepRead(paperID: Paper.ID) -> Bool {
+        guard let report = deepReadReport(for: paperID) else {
+            statusMessage = "No completed deep read is available for \(paperID)."
+            return false
+        }
+        focusPaper(id: paperID, replaceSelection: true)
+        presentedDeepRead = report
+        return true
+    }
+
+    func showOrQueueDeepRead(paperID: Paper.ID) {
+        if deepReadReport(for: paperID) != nil {
+            presentDeepRead(paperID: paperID)
+        } else {
+            queueDeepRead(paperID: paperID)
+        }
     }
 
     var lastSuccessfulFetchAt: Date? {
@@ -264,7 +295,12 @@ final class AppState: ObservableObject {
             statusMessage = "Local store unavailable: \(error.localizedDescription)"
             seedPreviewData()
         }
-        refreshAutomationStatus()
+        if backgroundAutomaticFetchingEnabled,
+           defaults.string(forKey: DefaultsKey.installedHelperBundleVersion) != currentBundleVersion {
+            repairBackgroundAutomaticFetching()
+        } else {
+            refreshAutomationStatus()
+        }
 #if os(macOS)
         databaseChangeObserver = DistributedNotificationCenter.default().addObserver(
             forName: .arxivResearchDatabaseDidChange,
@@ -405,7 +441,7 @@ final class AppState: ObservableObject {
             try load()
 
             if !report.failures.isEmpty {
-                let failedNames = report.failures.map(\.profileName).joined(separator: ", ")
+                let failedNames = report.failures.map { "\($0.profileName): \($0.message)" }.joined(separator: "; ")
                 let message = "Automatic fetch after \(trigger.statusDescription) failed for: \(failedNames)"
                 automationLastError = message
                 statusMessage = message
@@ -1197,6 +1233,12 @@ final class AppState: ObservableObject {
                 self.automationLastError = nil
                 self.backgroundAutomaticFetchingEnabled = enabled
                 self.defaults.set(enabled, forKey: DefaultsKey.backgroundAutomaticFetching)
+                if enabled {
+                    self.defaults.set(
+                        self.currentBundleVersion,
+                        forKey: DefaultsKey.installedHelperBundleVersion
+                    )
+                }
                 self.statusMessage = enabled
                     ? "Background automatic fetching is on."
                     : "Background automatic fetching is off; app-open checks remain active."
@@ -1674,17 +1716,43 @@ final class AppState: ObservableObject {
     }
 
     private func keychainValue(for key: String) async throws -> String? {
+        if let cachedValue = cachedKeychainValues[key] {
+            return cachedValue
+        }
+        if missingKeychainValues.contains(key) {
+            return nil
+        }
         let service = keychain.service
-        return try await Task.detached(priority: .userInitiated) {
-            try KeychainStore(service: service).get(key)
+        let accessGroup = keychain.accessGroup
+        let migrateLegacyItems = keychain.migrateLegacyItems
+        let value = try await Task.detached(priority: .userInitiated) {
+            try KeychainStore(
+                service: service,
+                accessGroup: accessGroup,
+                migrateLegacyItems: migrateLegacyItems
+            ).get(key)
         }.value
+        if let value {
+            cachedKeychainValues[key] = value
+        } else {
+            missingKeychainValues.insert(key)
+        }
+        return value
     }
 
     private func setKeychainValue(_ value: String, for key: String) async throws {
         let service = keychain.service
+        let accessGroup = keychain.accessGroup
+        let migrateLegacyItems = keychain.migrateLegacyItems
         try await Task.detached(priority: .userInitiated) {
-            try KeychainStore(service: service).set(value, for: key)
+            try KeychainStore(
+                service: service,
+                accessGroup: accessGroup,
+                migrateLegacyItems: migrateLegacyItems
+            ).set(value, for: key)
         }.value
+        cachedKeychainValues[key] = value
+        missingKeychainValues.remove(key)
     }
 
     private func azureDeploymentName(for baseURL: URL) -> String? {
@@ -1711,6 +1779,10 @@ final class AppState: ObservableObject {
             }
         }
         throw lastError ?? LLMProviderError.invalidResponse
+    }
+
+    private var currentBundleVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
     }
 
     private static func formatNumber(_ value: Double) -> String {
@@ -1766,6 +1838,7 @@ final class AppState: ObservableObject {
 
 private enum DefaultsKey {
     static let backgroundAutomaticFetching = "automation.backgroundAutomaticFetching"
+    static let installedHelperBundleVersion = "automation.installedHelperBundleVersion"
     static let providerKind = "provider.kind"
     static let providerModel = "provider.model"
     static let providerDeploymentName = "provider.deploymentName"

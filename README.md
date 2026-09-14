@@ -24,7 +24,7 @@ ArxivResearch is early-stage software. The macOS workspace, scheduled helper, lo
 
 Download the Apple Silicon macOS app from [GitHub Releases](https://github.com/liujin112/ArxivResearch/releases).
 
-The first public build is ad-hoc signed but not Apple-notarized. On first launch, Control-click the app, choose **Open**, then confirm **Open**. Users who require a notarized build can build from source or wait for a future Developer ID release.
+Release 0.3.1 is ad-hoc signed and not Apple-notarized. macOS may require Control-clicking the app and choosing **Open**, or choosing **Open Anyway** in Privacy & Security. Automatic updating is disabled in this build; download and replace the app manually.
 
 ## Requirements
 
@@ -76,6 +76,7 @@ Open the app settings and configure:
 - Zotero: API key, user/group library ID, and collection key.
 - Deep read prompt.
 - Automation helper installation.
+- Automatic update checks and optional background download and installation.
 
 Secrets are saved in macOS Keychain. Runtime settings are saved under the app's Application Support directory and should not be committed.
 
@@ -91,13 +92,13 @@ The package includes `ArxivResearchMobileUI`, `ArxivResearchMobileApp`, and `Arx
 
 ## Release Builds
 
-Unsigned release bundles can be created with:
+Ad-hoc-signed local release bundles can be created with:
 
 ```sh
 ./scripts/build-app-bundle.sh
 ```
 
-For public macOS distribution, sign the app and helper with Developer ID, enable hardened runtime, notarize the zipped app, staple the ticket, and publish the final archive through GitHub Releases. See [docs/RELEASE.md](docs/RELEASE.md).
+A signed release workflow is included for use after signing credentials are configured and the repository variable `ENABLE_SIGNED_RELEASES` is set to `true`. It signs the app, helper, and updater components with Developer ID, notarizes and staples the app, signs the update archive with Sparkle EdDSA, and publishes both the archive and appcast through GitHub Releases. See [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Development
 

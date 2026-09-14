@@ -12,11 +12,13 @@ extension Notification.Name {
 @main
 struct ArxivResearchApp: App {
     @StateObject private var state = AppState()
+    @StateObject private var updates = AppUpdateController()
 
     var body: some Scene {
         WindowGroup {
             ResearchWorkspaceView()
                 .environmentObject(state)
+                .environmentObject(updates)
         }
         .defaultSize(width: 1_480, height: 980)
         .windowToolbarStyle(.expanded)
@@ -55,8 +57,9 @@ struct ArxivResearchApp: App {
                 .keyboardShortcut("s", modifiers: [.command])
                 .disabled(state.selectedPaper == nil || state.isWorking)
 
-                Button("Deep Read") {
-                    state.queueDeepRead()
+                Button(state.selectedPaper.map { state.deepReadReport(for: $0.id) == nil ? "Deep Read" : "View Deep Read" } ?? "Deep Read") {
+                    guard let paper = state.selectedPaper else { return }
+                    state.showOrQueueDeepRead(paperID: paper.id)
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .disabled(state.selectedPaper == nil || state.isWorking)
@@ -69,11 +72,19 @@ struct ArxivResearchApp: App {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(state.pendingJobCount == 0 || state.isWorking)
             }
+
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updates.checkForUpdates()
+                }
+                .disabled(!updates.isConfigured)
+            }
         }
 
         Settings {
             SettingsView()
                 .environmentObject(state)
+                .environmentObject(updates)
                 .frame(
                     minWidth: 780,
                     idealWidth: 860,

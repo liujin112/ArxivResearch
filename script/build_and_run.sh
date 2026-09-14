@@ -15,6 +15,7 @@ APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_HELPERS="$APP_CONTENTS/Helpers"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_OUTPUT_DIR="$ROOT_DIR/.build/generated/AppIcon"
@@ -35,10 +36,12 @@ BUILD_APP_BINARY="$BUILD_BIN_DIR/$APP_PRODUCT"
 BUILD_HELPER_BINARY="$BUILD_BIN_DIR/$HELPER_PRODUCT"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_HELPERS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_HELPERS" "$APP_FRAMEWORKS"
 cp "$BUILD_APP_BINARY" "$APP_BINARY"
 cp "$BUILD_HELPER_BINARY" "$APP_HELPERS/$HELPER_PRODUCT"
 cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
+cp -R "$BUILD_BIN_DIR/Sparkle.framework" "$APP_FRAMEWORKS/Sparkle.framework"
+cp "$ROOT_DIR/.build/artifacts/sparkle/Sparkle/LICENSE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
 chmod +x "$APP_BINARY" "$APP_HELPERS/$HELPER_PRODUCT"
 
 cat >"$INFO_PLIST" <<PLIST
@@ -55,9 +58,9 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.0</string>
+  <string>0.3.1</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>4</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
@@ -66,6 +69,14 @@ cat >"$INFO_PLIST" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>SUFeedURL</key>
+  <string>https://github.com/liujin112/ArxivResearch/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>${SPARKLE_PUBLIC_ED_KEY:-}</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUAutomaticallyUpdate</key>
+  <true/>
 </dict>
 </plist>
 PLIST

@@ -93,6 +93,7 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
 
 private struct GeneralSettingsView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var updates: AppUpdateController
     @Binding var selection: SettingsDestination?
 
     var body: some View {
@@ -127,6 +128,48 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                     Spacer(minLength: 0)
+                }
+            }
+
+            SettingsCard(
+                title: "Software Updates",
+                subtitle: "Keep ArxivResearch current without downloading each release by hand.",
+                systemImage: "arrow.triangle.2.circlepath"
+            ) {
+                SettingsValueRow(label: "Installed version", value: updates.currentVersion)
+
+                Divider()
+                Toggle(
+                    "Automatically check for updates",
+                    isOn: Binding(
+                        get: { updates.automaticallyChecksForUpdates },
+                        set: { updates.setAutomaticallyChecksForUpdates($0) }
+                    )
+                )
+                .disabled(!updates.isConfigured)
+
+                Toggle(
+                    "Automatically download and install updates",
+                    isOn: Binding(
+                        get: { updates.automaticallyDownloadsUpdates },
+                        set: { updates.setAutomaticallyDownloadsUpdates($0) }
+                    )
+                )
+                .disabled(!updates.isConfigured || !updates.automaticallyChecksForUpdates)
+
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(updates.isConfigured
+                        ? "Updates are signature-verified before installation and take effect after a relaunch."
+                        : "Automatic updates become available in signed release builds.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Button {
+                        updates.checkForUpdates()
+                    } label: {
+                        Label("Check Now", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!updates.isConfigured)
                 }
             }
 

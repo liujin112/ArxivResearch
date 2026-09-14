@@ -3,18 +3,17 @@ import Foundation
 public final class ArxivHTTPClient: ArxivClient, @unchecked Sendable {
     private let session: URLSession
     private let parser: ArxivAtomParser
+    private let requestGate: ArxivRequestGate
 
     public init(session: URLSession = .shared, parser: ArxivAtomParser = ArxivAtomParser()) {
         self.session = session
         self.parser = parser
+        self.requestGate = ArxivRequestGate()
     }
 
     public func search(_ request: ArxivAPIRequest) async throws -> ArxivFeed {
         let url = try request.url()
-        let (data, response) = try await session.data(from: url)
-        if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
-            throw ArxivError.apiError("HTTP \(httpResponse.statusCode)")
-        }
+        let data = try await requestGate.data(from: url, session: session)
         let feed = try parser.parse(data)
         if feed.isError {
             throw ArxivError.apiError(feed.errorMessage ?? "Unknown arXiv error")

@@ -37,6 +37,10 @@ struct LaunchAgentInstallerTests {
         #expect(plist["ProgramArguments"] as? [String] == [installer.installedHelperExecutableURL.path])
         #expect(plist["StandardOutPath"] as? String == result.logDirectoryURL.appendingPathComponent("helper.out.log").path)
         #expect(plist["StandardErrorPath"] as? String == result.logDirectoryURL.appendingPathComponent("helper.err.log").path)
+        #expect(
+            (plist["EnvironmentVariables"] as? [String: String])?[KeychainStore.accessGroupEnvironmentKey]
+                == "TESTTEAM.com.arxivresearch.shared"
+        )
     }
 
     @Test("Reinstallation unloads an existing service before bootstrapping the new plist")
@@ -234,6 +238,7 @@ private final class InstallerFixture {
             label: label,
             helperExecutableURL: helperURL,
             intervalSeconds: 3_600,
+            keychainAccessGroup: "TESTTEAM.com.arxivresearch.shared",
             homeDirectoryURL: rootURL,
             userID: userID,
             commandRunner: runner

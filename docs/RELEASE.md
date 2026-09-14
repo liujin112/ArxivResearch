@@ -1,6 +1,6 @@
 # Release Process
 
-This project ships as a SwiftPM-built macOS `.app` bundle. Local debug bundles do not require signing, but public distribution should use Developer ID signing and Apple notarization.
+ArxivResearch ships as a SwiftPM-built macOS app. Local bundles may use an ad-hoc signature, while future signed releases must keep the same Developer ID identity, be notarized by Apple, and use the same Sparkle EdDSA key. Those identities are what let macOS trust an update and let the app and helper retain Keychain access.
 
 ## Preflight
 
@@ -20,112 +20,103 @@ Audit secrets before publishing:
 git grep -n -I -E 'sk-|api[_-]?key|secret|token|Bearer |password|private[_-]?key'
 ```
 
-If available, also run:
+If available, also run `gitleaks detect`.
+
+## One-time GitHub setup
+
+The tag-driven workflow in `.github/workflows/release.yml` runs only when the repository variable `ENABLE_SIGNED_RELEASES` is `true`. Enable it after configuring these repository secrets:
+
+- `DEVELOPER_ID_APPLICATION`: the full Developer ID Application identity.
+- `DEVELOPER_ID_CERTIFICATE_BASE64`: a base64-encoded `.p12` containing that identity and private key.
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`: the `.p12` export password.
+- `DEVELOPMENT_TEAM`: the 10-character Apple Developer team ID.
+- `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY`: App Store Connect API key credentials accepted by `notarytool`.
+- `SPARKLE_PUBLIC_ED_KEY` and `SPARKLE_PRIVATE_ED_KEY`: the update archive signing key pair.
+
+Generate the Sparkle key pair once after package resolution:
 
 ```sh
-gitleaks detect
+swift package resolve
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account com.arxivresearch
+.build/artifacts/sparkle/Sparkle/bin/generate_keys \
+  --account com.arxivresearch \
+  -x /path/outside-the-repository/arxivresearch-sparkle-private-key
 ```
 
-## Version
+Save the printed public key as `SPARKLE_PUBLIC_ED_KEY`. Save the exact contents of the exported private-key file as `SPARKLE_PRIVATE_ED_KEY`, then protect or remove the exported file. Never commit either private key or signing certificate.
 
-Update release version strings in:
+## Local build
 
-- `scripts/build-app-bundle.sh`
-- `script/build_and_run.sh`
-- `CHANGELOG.md`
-
-The current bundle identifier is `com.arxivresearch.app`.
-
-## Build
-
-Create the ad-hoc signed release app bundle:
+Create an ad-hoc-signed local bundle:
 
 ```sh
 ./scripts/build-app-bundle.sh
 ```
 
-The script signs the nested helper first, signs the app, verifies the full bundle, and prints the generated path, normally:
+The generated app is normally at:
 
 ```text
 .build/release/ArxivResearch.app
 ```
 
-## Developer ID Sign
+An ad-hoc build intentionally leaves automatic updates disabled because it has no embedded update-verification key. Version 0.3.1 is explicitly distributed in this mode, with manual installation and an unnotarized-build notice.
 
-The default build uses an ad-hoc signature for local and GitHub testing. For a notarizable public build, set your Developer ID Application identity when building:
+## Automated public release
+
+Prepare the version notes at `docs/releases/vX.Y.Z.md`, update `CHANGELOG.md`, and push an annotated version tag:
 
 ```sh
-export SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'
+git tag -a v0.3.1 -m "v0.3.1"
+git push origin main
+git push origin v0.3.1
+```
+
+The release workflow then:
+
+1. Imports the Developer ID certificate into a temporary keychain.
+2. Builds the app and helper with a shared, team-scoped Keychain access group.
+3. Embeds the Sparkle feed URL and public EdDSA key.
+4. Signs the updater components, helper, and app with hardened runtime.
+5. Submits the app to Apple, waits for notarization, staples the ticket, and verifies Gatekeeper acceptance.
+6. Creates the final zip, signs it with Sparkle EdDSA, generates `appcast.xml`, and publishes both as GitHub Release assets.
+
+The app reads its feed from:
+
+```text
+https://github.com/liujin112/ArxivResearch/releases/latest/download/appcast.xml
+```
+
+## Manual signed build
+
+For a local release rehearsal, provide the same identity, team, and Sparkle public key used by production:
+
+```sh
+APP_VERSION=0.3.1 \
+BUILD_NUMBER=4 \
+SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+DEVELOPMENT_TEAM='TEAMID' \
+SPARKLE_PUBLIC_ED_KEY='base64-public-key' \
 ./scripts/build-app-bundle.sh
 ```
 
-The build script signs the nested helper first, then the app. To re-sign an existing bundle manually:
+Verify the code signature:
 
 ```sh
-codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
-  .build/release/ArxivResearch.app/Contents/Helpers/ArxivResearchHelper
-
-codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
-  .build/release/ArxivResearch.app
-
 codesign --verify --deep --strict --verbose=2 \
   .build/release/ArxivResearch.app
 ```
 
-Inspect:
+Before notarization, `spctl` may reject the bundle. After notarization and stapling it must succeed:
 
 ```sh
-spctl --assess --type execute --verbose=4 .build/release/ArxivResearch.app
+spctl --assess --type execute --verbose=4 \
+  .build/release/ArxivResearch.app
 ```
 
-`spctl` may reject before notarization. That is expected for an unsigned or unnotarized archive.
+## Release invariants
 
-## Notarize
-
-Create a notarization zip:
-
-```sh
-ditto -c -k --keepParent .build/release/ArxivResearch.app \
-  .build/release/ArxivResearch-notarize.zip
-```
-
-Submit with an App Store Connect keychain profile:
-
-```sh
-xcrun notarytool submit .build/release/ArxivResearch-notarize.zip \
-  --keychain-profile "$NOTARYTOOL_PROFILE" \
-  --wait
-```
-
-Staple:
-
-```sh
-xcrun stapler staple .build/release/ArxivResearch.app
-xcrun stapler validate .build/release/ArxivResearch.app
-```
-
-Create the final release archive:
-
-```sh
-ditto -c -k --keepParent .build/release/ArxivResearch.app \
-  .build/release/ArxivResearch-v0.2.0-macos-arm64.zip
-```
-
-## Tag And Publish
-
-```sh
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin main
-git push origin v0.2.0
-```
-
-Create a GitHub Release:
-
-```sh
-gh release create v0.2.0 \
-  .build/release/ArxivResearch-v0.2.0-macos-arm64.zip \
-  --title "ArxivResearch v0.2.0" \
-  --notes-file docs/releases/v0.2.0.md
-```
-
-For a first public release, write curated release notes instead of uploading the entire changelog as-is.
+- Ad-hoc releases require explicit release-owner approval and must state that notarization and automatic updates are unavailable.
+- Do not rotate the Developer ID certificate and Sparkle key in the same release.
+- Do not remove `SUPublicEDKey` after it has shipped.
+- Keep `DEVELOPMENT_TEAM` unchanged so the app and helper retain the same shared Keychain access group.
+- A user upgrading from an older ad-hoc build may see one final credential-migration prompt. Properly signed later updates should not repeat it.

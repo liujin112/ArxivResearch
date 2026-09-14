@@ -6,6 +6,31 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-14
+
+Includes the previously unpublished 0.3.0 work.
+
+### Added
+
+- Deep-read report viewer with Markdown copying and direct access from paper lists and recent activity.
+- Sparkle update controls and a signed-release workflow, ready for deployment once signing and update keys are configured.
+
+### Changed
+
+- Cache Keychain values during the app session and update credentials in place.
+- Add shared Keychain access-group support for future Developer ID builds.
+- Refresh installed background helpers when the app version changes.
+
+### Fixed
+
+- Coordinate arXiv requests across clients and app/helper processes, with at least 3.5 seconds between requests.
+- Persist shared cooldowns for HTTP 429/503, honor Retry-After, and apply exponential backoff starting at 60 seconds.
+- Show automatic-fetch error details and the next permitted retry time.
+
+### Distribution
+
+- This release remains ad-hoc signed and unnotarized. Automatic updates are disabled without a Sparkle verification key; installation is manual.
+
 ## [0.2.0] - 2026-08-11
 
 ### Added

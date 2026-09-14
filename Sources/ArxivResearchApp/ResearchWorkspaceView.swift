@@ -173,6 +173,12 @@ struct ResearchWorkspaceView: View {
             QueryEditorSheetView(profile: state.editingQueryProfile)
                 .environmentObject(state)
         }
+        .sheet(item: $state.presentedDeepRead) { report in
+            DeepReadResultView(
+                paper: state.papers.first(where: { $0.id == report.paperID }),
+                report: report
+            )
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 state.handleAppBecameActive()
@@ -637,9 +643,10 @@ private struct DailyBriefingView: View {
             selectedPaperID: displayedPapers.contains(where: { $0.id == state.selectedPaperID })
                 ? state.selectedPaperID
                 : displayedPapers.first?.id,
+            deepReads: state.latestDeepReadsByPaperID,
             selectPaper: { state.focusPaper(id: $0) },
             savePaper: { state.setInterested(paperID: $0) },
-            deepReadPaper: { state.queueDeepRead(paperID: $0) },
+            deepReadPaper: { state.showOrQueueDeepRead(paperID: $0) },
             openPaper: openPaper
         )
         .equatable()
@@ -677,6 +684,7 @@ private struct BriefingPaperFeed: View, Equatable {
     let papers: [Paper]
     let analyses: [String: LLMAnalysis]
     let selectedPaperID: Paper.ID?
+    let deepReads: [String: DeepReadReport]
     let selectPaper: (Paper.ID) -> Void
     let savePaper: (Paper.ID) -> Void
     let deepReadPaper: (Paper.ID) -> Void
@@ -686,6 +694,7 @@ private struct BriefingPaperFeed: View, Equatable {
         lhs.papers == rhs.papers
             && lhs.analyses == rhs.analyses
             && lhs.selectedPaperID == rhs.selectedPaperID
+            && lhs.deepReads == rhs.deepReads
     }
 
     var body: some View {
@@ -696,6 +705,7 @@ private struct BriefingPaperFeed: View, Equatable {
                         rank: index + 1,
                         paper: paper,
                         analysis: analyses[paper.arxivID],
+                        deepRead: deepReads[paper.arxivID],
                         isSelected: selectedPaperID == paper.id,
                         selectPaper: selectPaper,
                         savePaper: savePaper,
@@ -726,6 +736,7 @@ private struct BriefingPaperRow: View {
     let rank: Int
     let paper: Paper
     let analysis: LLMAnalysis?
+    let deepRead: DeepReadReport?
     let isSelected: Bool
     let selectPaper: (Paper.ID) -> Void
     let savePaper: (Paper.ID) -> Void
@@ -763,7 +774,10 @@ private struct BriefingPaperRow: View {
                     Button {
                         deepReadPaper(paper.id)
                     } label: {
-                        Label("Deep Read", systemImage: "book")
+                        Label(
+                            deepRead == nil ? "Deep Read" : "View Deep Read",
+                            systemImage: deepRead == nil ? "book" : "book.pages"
+                        )
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
@@ -1173,27 +1187,48 @@ private struct RecentActivityTimeline: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(jobs) { job in
-                    HStack(alignment: .top, spacing: 9) {
-                        Image(systemName: icon(for: job.state))
-                            .foregroundStyle(color(for: job.state))
-                            .frame(width: 16)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(activityTitle(job))
-                                .font(.caption)
-                                .lineLimit(1)
-                            Text(payload(job))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                    if let paperID = deepReadPaperID(for: job) {
+                        Button {
+                            state.presentDeepRead(paperID: paperID)
+                        } label: {
+                            activityRow(job, showsDisclosure: true)
                         }
-                        Spacer()
-                        Text((job.completedAt ?? job.claimedAt ?? job.scheduledAt).formatted(date: .omitted, time: .shortened))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(activityTitle(job)), \(payload(job))")
+                        .accessibilityHint("Open the completed deep-read report")
+                    } else {
+                        activityRow(job, showsDisclosure: false)
                     }
                 }
             }
         }
+    }
+
+    private func activityRow(_ job: SyncJob, showsDisclosure: Bool) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon(for: job.state))
+                .foregroundStyle(color(for: job.state))
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(activityTitle(job))
+                    .font(.caption)
+                    .lineLimit(1)
+                Text(payload(job))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text((job.completedAt ?? job.claimedAt ?? job.scheduledAt).formatted(date: .omitted, time: .shortened))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            if showsDisclosure {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     private func activityTitle(_ job: SyncJob) -> String {
@@ -1225,6 +1260,16 @@ private struct RecentActivityTimeline: View {
         case let .raw(value):
             return value
         }
+    }
+
+    private func deepReadPaperID(for job: SyncJob) -> Paper.ID? {
+        guard job.kind == .deepRead, job.state == .succeeded,
+              case let .paper(id) = try? job.typedPayload(),
+              state.deepReadReport(for: id) != nil
+        else {
+            return nil
+        }
+        return id
     }
 
     private func icon(for state: SyncJob.State) -> String {
@@ -1580,9 +1625,12 @@ private struct LibraryPaperRow: View {
 
                 Button {
                     state.focusPaper(id: paper.id, replaceSelection: true)
-                    state.queueDeepRead(paperID: paper.id)
+                    state.showOrQueueDeepRead(paperID: paper.id)
                 } label: {
-                    Label("Deep Read", systemImage: "book")
+                    Label(
+                        state.deepReadReport(for: paper.id) == nil ? "Deep Read" : "View Deep Read",
+                        systemImage: state.deepReadReport(for: paper.id) == nil ? "book" : "book.pages"
+                    )
                 }
                 .buttonStyle(.bordered)
             }
@@ -1713,10 +1761,48 @@ private struct LibraryContextRail: View {
                         TagStripView(tags: contextTags(paper), displayMode: .chips, layout: .wrap)
                     }
 
+                    if let report = state.deepReadReport(for: paper.id) {
+                        Button {
+                            state.presentDeepRead(paperID: paper.id)
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "book.pages.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(WorkspaceTheme.accent)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Deep Read ready")
+                                        .font(.callout.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    Text("Completed \(report.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(report.sourceKind.displayName)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(WorkspaceTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(WorkspaceTheme.accent.opacity(0.18), lineWidth: 1)
+                            }
+                            .contentShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open the completed deep-read report")
+                    }
+
                     Button {
-                        state.queueDeepRead(paperID: paper.id)
+                        state.showOrQueueDeepRead(paperID: paper.id)
                     } label: {
-                        Label("Deep Read", systemImage: "book")
+                        Label(
+                            state.deepReadReport(for: paper.id) == nil ? "Deep Read" : "View Deep Read",
+                            systemImage: state.deepReadReport(for: paper.id) == nil ? "book" : "book.pages"
+                        )
                             .font(.callout.weight(.semibold))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -1942,10 +2028,11 @@ private struct SavedPapersView: View {
                             rank: index + 1,
                             paper: paper,
                             analysis: state.latestAnalysesByPaperID[paper.arxivID],
+                            deepRead: state.deepReadReport(for: paper.id),
                             isSelected: state.selectedPaperID == paper.id,
                             selectPaper: { state.focusPaper(id: $0) },
                             savePaper: { state.setInterested(paperID: $0) },
-                            deepReadPaper: { state.queueDeepRead(paperID: $0) },
+                            deepReadPaper: { state.showOrQueueDeepRead(paperID: $0) },
                             openPaper: openPaper
                         )
                         Divider().padding(.leading, 72)
@@ -2676,9 +2763,12 @@ struct PaperListView: View {
                         Label(count > 1 ? "Analyze \(count) Abstracts" : "Analyze Abstract", systemImage: "text.badge.checkmark")
                     }
                     Button {
-                        state.queueDeepRead(paperID: paper.id)
+                        state.showOrQueueDeepRead(paperID: paper.id)
                     } label: {
-                        Label("Deep Read", systemImage: "doc.text.magnifyingglass")
+                        Label(
+                            state.deepReadReport(for: paper.id) == nil ? "Deep Read" : "View Deep Read",
+                            systemImage: state.deepReadReport(for: paper.id) == nil ? "doc.text.magnifyingglass" : "book.pages"
+                        )
                     }
                     Button {
                         state.setInterested(paperID: paper.id)
@@ -3119,6 +3209,97 @@ private struct NativePaperDocumentView: View {
 
     private var deepReadText: AttributedString {
         (try? AttributedString(markdown: deepReadMarkdown)) ?? AttributedString(deepReadMarkdown)
+    }
+}
+
+private struct DeepReadResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let paper: Paper?
+    let report: DeepReadReport
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "book.pages.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(WorkspaceTheme.accent)
+                    .frame(width: 42, height: 42)
+                    .background(WorkspaceTheme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Deep Read")
+                        .font(.title2.weight(.semibold))
+                    Text(paper?.title ?? report.paperID)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+
+                    HStack(spacing: 14) {
+                        Label(
+                            report.createdAt.formatted(date: .abbreviated, time: .shortened),
+                            systemImage: "clock"
+                        )
+                        Label(report.sourceKind.displayName, systemImage: "doc.richtext")
+                        Text(report.paperID)
+                            .textSelection(.enabled)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                }
+
+                Spacer(minLength: 18)
+
+                HStack(spacing: 8) {
+                    Button {
+                        copyMarkdown()
+                    } label: {
+                        Label("Copy Markdown", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Copy the full deep-read report as Markdown")
+
+                    if let url = paper?.absURL {
+                        Link(destination: url) {
+                            Label("arXiv", systemImage: "arrow.up.right.square")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close")
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+
+            Divider()
+
+            MarkdownWebView(html: MarkdownHTMLRenderer().render(report.markdown))
+                .background(Color(nsColor: .textBackgroundColor))
+        }
+        .frame(minWidth: 760, idealWidth: 920, minHeight: 620, idealHeight: 780)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func copyMarkdown() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report.markdown, forType: .string)
+    }
+}
+
+private extension DeepReadReport.SourceKind {
+    var displayName: String {
+        switch self {
+        case .html: "HTML full text"
+        case .pdf: "PDF full text"
+        case .mixed: "HTML and PDF"
+        }
     }
 }
 

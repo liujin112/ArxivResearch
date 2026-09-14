@@ -589,6 +589,7 @@ public enum ArxivError: Error, LocalizedError, Equatable {
     case invalidURL(String)
     case invalidPaging(String)
     case apiError(String)
+    case rateLimited(retryAt: Date)
     case parseError(String)
 
     public var errorDescription: String? {
@@ -597,6 +598,8 @@ public enum ArxivError: Error, LocalizedError, Equatable {
             "Invalid arXiv API URL: \(url)"
         case let .invalidPaging(message):
             message
+        case let .rateLimited(retryAt):
+            "arXiv is temporarily rate limited or unavailable. Try again after \(retryAt.formatted(date: .omitted, time: .standard))."
         case let .apiError(message):
             "arXiv API error: \(message)"
         case let .parseError(message):

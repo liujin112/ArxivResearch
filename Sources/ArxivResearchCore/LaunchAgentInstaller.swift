@@ -165,6 +165,7 @@ public struct LaunchAgentInstaller {
     public var label: String
     public var helperExecutableURL: URL
     public var intervalSeconds: Int
+    public var keychainAccessGroup: String?
 
     private var homeDirectoryURL: URL
     private var userID: Int
@@ -174,12 +175,14 @@ public struct LaunchAgentInstaller {
     public init(
         label: String = "com.arxivresearch.helper",
         helperExecutableURL: URL,
-        intervalSeconds: Int = 3600
+        intervalSeconds: Int = 3600,
+        keychainAccessGroup: String? = KeychainStore.configuredAccessGroup
     ) {
         self.init(
             label: label,
             helperExecutableURL: helperExecutableURL,
             intervalSeconds: intervalSeconds,
+            keychainAccessGroup: keychainAccessGroup,
             homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser,
             userID: Self.currentUserID,
             commandRunner: SystemLaunchAgentCommandRunner()
@@ -190,6 +193,7 @@ public struct LaunchAgentInstaller {
         label: String = "com.arxivresearch.helper",
         helperExecutableURL: URL,
         intervalSeconds: Int = 3600,
+        keychainAccessGroup: String? = nil,
         homeDirectoryURL: URL,
         userID: Int,
         commandRunner: any LaunchAgentCommandRunning,
@@ -198,6 +202,7 @@ public struct LaunchAgentInstaller {
         self.label = label
         self.helperExecutableURL = helperExecutableURL
         self.intervalSeconds = intervalSeconds
+        self.keychainAccessGroup = keychainAccessGroup?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.homeDirectoryURL = homeDirectoryURL
         self.userID = userID
         self.commandRunner = commandRunner
@@ -223,7 +228,7 @@ public struct LaunchAgentInstaller {
 
     public func plistData() throws -> Data {
         try validateConfiguration(checkHelperExecutable: false)
-        let plist: [String: Any] = [
+        var plist: [String: Any] = [
             "Label": label,
             "ProgramArguments": [installedHelperExecutableURL.path],
             "RunAtLoad": true,
@@ -231,6 +236,11 @@ public struct LaunchAgentInstaller {
             "StandardOutPath": logPath("out"),
             "StandardErrorPath": logPath("err")
         ]
+        if let keychainAccessGroup {
+            plist["EnvironmentVariables"] = [
+                KeychainStore.accessGroupEnvironmentKey: keychainAccessGroup
+            ]
+        }
         return try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     }
 
